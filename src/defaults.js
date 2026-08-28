@@ -17,21 +17,26 @@
  * (single-signature, tampered policy, `can_spawn` via update, exceed the
  * template ceiling) have something to break without any setup.
  *
- * ── Keys are baked, certificates are not ───────────────────────────────────
+ * ── Nothing is baked. Every visit mints its own keys ───────────────────────
  *
- * RSA-2048 keygen is the slow part — roughly 1-3s per key in a browser, and this
- * chain needs five. Signing with an existing key is milliseconds.
+ * Both the keys and the certificates are generated in the visitor's tab on every
+ * load. `mint.js` carries the measurement that decided it: the full five-key
+ * chain takes ~190ms in Chromium on an M-series Mac, against DESIGN.md's
+ * pessimistic "1-3s, show a spinner".
  *
- * Baking the CERTIFICATES instead would be worse than slow: they carry a 24-hour
- * validity window (§12.3), so a certificate baked at build time expires the day
- * after and `Load Defaults` silently stops passing stage 2. Baking the KEYS and
- * issuing certificates at load time gives an instant default that is always
- * inside its validity window.
+ * At 190ms there was nothing to buy by shipping baked keypairs, and the cost
+ * would have been that every visitor shares one published private key. So they
+ * are minted instead, and "refresh is the reset" is literally true rather than a
+ * figure of speech — no key in this page outlives the tab it was created in.
  *
- * The keys are demo material by construction — the CA is in no trust store and
- * the name constraint makes it incapable of issuing anything that does not say
- * DEMO ONLY — so publishing them costs nothing. `Mint Fresh` generates new ones
- * for anyone who wants to watch keys being created.
+ * Baking the CERTIFICATES was never viable regardless: they carry a 24-hour
+ * validity window (§12.3), so one baked at build time expires the next day and
+ * `Reset Certs` would silently stop passing stage 2.
+ *
+ * (This comment previously described the rejected design as though it had
+ * shipped, which would have sent a reader looking for published private keys
+ * that do not exist. The build contains no key material at all — the only long
+ * base64 blobs in it are the favicon and the shield PNG.)
  */
 
 import { mintChain, newAgentId } from './mint.js';
