@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Both icons are inlined as data URIs by scripts/build.mjs, so the deployed
+     single file references nothing outside itself. The paths below exist only
+     for `pnpm dev`. -->
+<link rel="icon" type="image/png" href="./assets/favicon-32.png">
+<link rel="apple-touch-icon" href="./assets/favicon-32.png">
+<title>A2A Trust Playground — mint an agent identity, delegate a narrower one, watch it refuse</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+
+/* ── Palette — ported from sentinel-mesh-zero-trust/webui/static/style.css ──
+   Light-first with an automatic dark variant, because this page is a TOOL that
+   people read and edit, not a demo to be watched. The earlier console skin
+   (neon on black, glow text-shadows) is right for a recorded walkthrough and
+   wrong for sustained reading of ~190 lines of JSON.
+
+   Status is carried by TINTED BACKGROUNDS rather than glowing borders. Across
+   nine pipeline boxes plus two not-applicable ones, glow borders turn into
+   noise; a flat tint reads at a glance and survives being screenshotted.
+
+   This is the ONLY place a literal colour may appear. Everything below resolves
+   through these tokens, so a reskin stays a :root swap — which is what made
+   this change cheap. */
+:root{
+  --bg:#f7f7f8; --panel-bg:#ffffff;
+  --text:#1c1e21; --text-dim:#5b6169;
+  --border:#d9dce1; --border-strong:#c2c7cf;
+
+  /* The editor stays a dark mono block inside the light page: it is terminal
+     output, and reads as such. */
+  --mono-bg:#10131a; --mono-text:#e6e9ef; --mono-dim:#7d8595; --mono-border:#242a35;
+
+  --green:#0b3d2e; --green-line:#2e7d5b; --green-text:#1f9d63;
+  --red:#3d1a1a;   --red-line:#a13d3d;   --red-text:#d8524f;
+  --amber-line:#b8860b; --amber-text:#b8860b;
+  --idle-line:#9aa1ab;  --idle-text:#9aa1ab;
+  --accent:#3b82f6; --accent-2:#a855f7; --teal:#14b8a6;
+
+  --font:ui-monospace,'JetBrains Mono','SF Mono',Menlo,Consolas,'Courier New',monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#14161a; --panel-bg:#1b1e24;
+    --text:#e8eaed; --text-dim:#9aa1ab;
+    --border:#2c3038; --border-strong:#3a3f49;
+    --mono-bg:#0b0d11; --mono-text:#d9dee6; --mono-border:#232833;
+  }
+}
+
+html,body{min-height:100%;background:var(--bg);color:var(--text);
+  font-family:var(--sans);font-size:13px;line-height:1.5;overflow-x:hidden}
+
+#app{position:relative;min-height:100vh;display:flex;flex-direction:column;
+  max-width:1600px;margin:0 auto;padding:14px;gap:12px}
+
+/* Back link — reproduces shared.css .back rather than linking to it. */
+.back{display:inline-block;align-self:flex-start;font-size:12.5px;font-weight:600;
+  text-decoration:none;color:#b87ab5;
+  background:linear-gradient(90deg,#8a5a85 0%,#b87ab5 25%,#dda8d8 42%,#f0dff0 50%,
+    #dda8d8 58%,#b87ab5 75%,#8a5a85 100%);
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.back:hover{text-decoration:underline}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+#header{border:1px solid var(--border);background:var(--panel-bg);border-radius:8px;
+  padding:12px 18px;display:flex;align-items:center;justify-content:space-between;
+  gap:16px;flex-wrap:wrap}
+.brand-block{display:flex;align-items:center;gap:12px;min-width:0}
+#shield{flex:0 0 auto;display:block;border-radius:6px}
+.brand{font-size:15px;font-weight:700;letter-spacing:.02em;color:var(--text)}
+.brand-sub{font-size:11px;color:var(--text-dim);margin-top:3px}
+.head-right{display:flex;align-items:center;gap:16px;font-size:11px;flex-wrap:wrap}
+.head-right a{color:var(--accent);text-decoration:none;font-weight:600}
+.head-right a:hover{text-decoration:underline}
+#build-stamp{color:var(--text-dim);font-family:var(--font);font-size:10px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;vertical-align:middle}
+.dot.green{background:var(--green-text)}
+.dot.amber{background:var(--amber-text)}
+.dot.red{background:var(--red-text)}
+.dot.dim{background:var(--idle-line)}
+
+/* ── How-to strip — the entry point ─────────────────────────────────────── */
+#howto{border-left:3px solid var(--accent);border-radius:0 6px 6px 0;
+  padding:10px 14px;background:color-mix(in srgb,var(--accent) 6%,var(--panel-bg));
+  font-size:12.5px;line-height:1.65;color:var(--text-dim)}
+#howto b{color:var(--text);font-weight:700}
+
+/* Divider between the two control groups, so nineteen buttons stop reading as
+   one undifferentiated grid. */
+.group-rule{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
+  margin:14px 0 9px;padding-bottom:7px;border-bottom:1px solid var(--border);
+  font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--red-text)}
+.group-rule .hint{font-weight:400;letter-spacing:0;text-transform:none;
+  color:var(--text-dim)}
+.group-rule.ok{color:var(--green-text)}
+.admin-btn.ok{border-color:var(--green-line);color:var(--green-text);
+  background:color-mix(in srgb,var(--green-line) 8%,transparent)}
+.admin-btn.ok:hover:not(:disabled){background:color-mix(in srgb,var(--green-line) 18%,transparent)}
+.admin-btn.ok .sec-tag{color:var(--green-text);opacity:.8}
+
+/* A lede under the section title, rather than a legend floating at the far
+   right where it reads as unrelated to the buttons it describes. */
+.section-lede{font-size:12.5px;line-height:1.65;color:var(--text-dim);
+  margin:-2px 0 12px;max-width:96ch}
+.section-lede b{font-weight:700}
+
+/* ── Phase-grouped controls ─────────────────────────────────────────────── */
+#controls-phases{display:flex;flex-direction:column;gap:12px;margin-top:4px}
+.phase-group{border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.phase-head{display:flex;align-items:baseline;gap:10px;padding:7px 11px;
+  background:color-mix(in srgb,var(--idle-line) 8%,transparent);
+  border-bottom:1px solid var(--border)}
+.phase-name{font-size:11px;font-weight:800;letter-spacing:.07em;color:var(--text)}
+.phase-ask{font-size:11px;color:var(--text-dim)}
+.phase-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(206px,1fr));
+  gap:7px;padding:9px 11px}
+.k-ok{color:var(--green-text);font-weight:700}
+.k-no{color:var(--red-text);font-weight:700}
+
+/* ── Reference pane — tabs over the four consult-afterwards panels ──────── */
+/* The tab strip inherits .panel-title, whose justify-content:space-between
+   spread these edge to edge — four tabs then read as four separate section
+   HEADINGS rather than one control you can click between. Group them left. */
+#ref-tabs{display:flex;justify-content:flex-start;gap:4px;flex-wrap:wrap;
+  border-bottom:1px solid var(--border-strong);padding-bottom:0;margin-bottom:12px;
+  text-transform:none;letter-spacing:0}
+.ref-tab{border:1px solid var(--border);border-bottom-color:transparent;
+  border-radius:6px 6px 0 0;
+  background:color-mix(in srgb,var(--idle-line) 10%,transparent);
+  color:var(--text-dim);font-family:var(--sans);font-size:11.5px;
+  font-weight:700;letter-spacing:.04em;padding:7px 13px;cursor:pointer;margin-bottom:-1px}
+.ref-tab:hover{color:var(--text);background:color-mix(in srgb,var(--accent) 10%,transparent);
+  border-color:var(--accent)}
+.ref-tab.active{border-color:var(--border-strong);border-bottom-color:var(--panel-bg);
+  background:var(--panel-bg);color:var(--text);
+  box-shadow:inset 0 2px 0 var(--accent)}
+.ref-tab .badge{font-family:var(--font);font-weight:400;font-size:10.5px;
+  text-transform:none;letter-spacing:0;margin-left:6px}
+.ref-tab .badge.ok{color:var(--green-text)}
+.ref-tab .badge.bad{color:var(--red-text)}
+
+/* ── Panels ─────────────────────────────────────────────────────────────── */
+.panel{border:1px solid var(--border);background:var(--panel-bg);border-radius:8px;
+  padding:14px;display:flex;flex-direction:column;min-width:0}
+.panel-title{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text-dim);margin-bottom:10px;padding-bottom:8px;
+  border-bottom:1px solid var(--border);display:flex;justify-content:space-between;
+  align-items:baseline;gap:12px}
+.panel-title .hint{font-weight:400;letter-spacing:0;text-transform:none;font-size:11px}
+
+/* ── Pipeline — status by tinted background, not glow ───────────────────── */
+#pipeline{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:0 0 10px;flex:0 0 auto}
+.p-box{flex:1 1 0;min-width:0;border:1px solid var(--border);border-radius:6px;
+  padding:10px 6px;text-align:center;background:var(--panel-bg);
+  transition:background .18s,border-color .18s}
+.p-box .p-label{font-size:10px;color:var(--text-dim);font-family:var(--font)}
+.p-box .p-name{font-size:12px;font-weight:800;margin-top:3px;letter-spacing:.03em;color:var(--text)}
+.p-box .p-ask{font-size:10px;color:var(--text-dim);margin-top:4px;line-height:1.3;
+  overflow-wrap:anywhere}
+.p-box .p-sub{font-size:10.5px;font-weight:700;margin-top:7px;letter-spacing:.06em;
+  color:var(--text-dim)}
+.p-arrow{flex:0 0 auto;display:flex;align-items:center;padding:0 3px;font-size:16px;
+  color:var(--idle-line);font-weight:700}
+.p-arrow.ok{color:var(--green-line)}
+.p-arrow.err{color:var(--red-line)}
+.p-arrow.skip{color:var(--idle-line);opacity:.4}
+.p-box.ok{border-color:transparent;background:color-mix(in srgb,var(--green-line) 16%,transparent)}
+.p-box.ok .p-name,.p-box.ok .p-sub{color:var(--green-text)}
+.p-box.err{border-color:var(--red-line);background:color-mix(in srgb,var(--red-line) 16%,transparent)}
+.p-box.err .p-name,.p-box.err .p-sub{color:var(--red-text)}
+.p-box.skip{border-color:transparent;background:color-mix(in srgb,var(--idle-line) 10%,transparent)}
+.p-box.skip .p-name,.p-box.skip .p-label,.p-box.skip .p-sub,.p-box.skip .p-ask{color:var(--idle-text)}
+.p-box.na{border-style:dashed;border-color:var(--border-strong);
+  background:color-mix(in srgb,var(--amber-line) 8%,transparent)}
+.p-box.na .p-name{color:var(--amber-text)}
+
+/* ── Verdict banner ─────────────────────────────────────────────────────── */
+/* Kept deliberately louder than the rest of the Sentinel Mesh vocabulary: the
+   ERR_* · §N line is the element most likely to be screenshotted into a review
+   thread, so it earns the extra weight and the corner brackets. */
+#verdict{position:relative;border:1px solid var(--border);border-radius:8px;
+  padding:16px;text-align:center;min-height:88px;display:flex;align-items:center;
+  justify-content:center;background:var(--panel-bg)}
+.banner-inner{position:relative;word-break:break-word}
+.banner-alert{font-size:11px;font-weight:700;letter-spacing:.08em;margin-bottom:6px}
+.banner-main{font-size:22px;font-weight:800;letter-spacing:.06em;line-height:1.2}
+.banner-sub{font-size:11px;margin-top:8px;color:var(--text-dim);letter-spacing:.02em}
+.banner-code{font-family:var(--font);font-size:13px;font-weight:700;margin-top:8px;
+  letter-spacing:.02em}
+.b-corner{position:absolute;font-size:12px;line-height:1;opacity:.5}
+.b-corner.tl{top:8px;left:10px}.b-corner.tr{top:8px;right:10px}
+.b-corner.bl{bottom:8px;left:10px}.b-corner.br{bottom:8px;right:10px}
+#verdict.ok{border-color:var(--green-line);color:var(--green-text);
+  background:color-mix(in srgb,var(--green-line) 14%,transparent)}
+#verdict.err{border-color:var(--red-line);color:var(--red-text);
+  background:color-mix(in srgb,var(--red-line) 14%,transparent)}
+#verdict.idle{color:var(--idle-text)}
+#verdict.ok .banner-sub,#verdict.err .banner-sub{color:inherit;opacity:.85}
+
+/* ── Main: editor | decision log, side by side ──────────────────────────── */
+/* Bounded height, or the editor's gutter grows to fit ~190 lines and drags the
+   page to several thousand pixels. Flex/grid children default to
+   min-height:auto and will not shrink below content, so the whole subtree needs
+   min-height:0 for the internal scroll to engage. */
+#main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;
+  height:clamp(460px,62vh,820px)}
+#main > .panel{min-height:0}
+@media (max-width:1100px){#main{grid-template-columns:minmax(0,1fr);height:auto}
+  #main > .panel{height:clamp(380px,54vh,640px)}}
+
+#editor-wrap{display:flex;flex:1;min-height:0;border:1px solid var(--mono-border);
+  border-radius:6px;background:var(--mono-bg);overflow:hidden}
+#gutter{flex:0 0 auto;padding:10px 8px 10px 10px;text-align:right;user-select:none;
+  color:var(--mono-dim);font-family:var(--font);font-size:11.5px;line-height:1.55;
+  overflow:hidden;min-height:0;border-right:1px solid var(--mono-border);
+  background:color-mix(in srgb,var(--mono-bg) 88%,#ffffff)}
+#gutter .g-line{display:block;white-space:pre}
+#gutter .g-line.bad{color:#ffffff;font-weight:700;
+  background:var(--red-line);border-radius:2px}
+#doc{flex:1;min-width:0;min-height:0;padding:10px 12px;border:0;outline:0;resize:none;
+  background:transparent;color:var(--mono-text);font-family:var(--font);
+  font-size:11.5px;line-height:1.55;white-space:pre;overflow:auto;tab-size:2}
+#doc::selection{background:color-mix(in srgb,var(--accent) 45%,transparent);color:#fff}
+
+/* ── Decision log ───────────────────────────────────────────────────────── */
+#log{flex:1;overflow:auto;min-height:0}
+.log-row{display:grid;grid-template-columns:24px 50px 68px 1fr;gap:10px;
+  align-items:baseline;padding:7px 8px;border-bottom:1px solid var(--border);
+  font-size:12px}
+.log-row .ln{color:var(--text-dim);font-family:var(--font)}
+.log-row .sec{color:var(--accent);font-family:var(--font);font-size:11px}
+.log-row .res{font-weight:700;font-size:11px;letter-spacing:.04em}
+.log-row .detail{color:var(--text);line-height:1.5;word-break:break-word}
+.log-row.pass .res{color:var(--green-text)}
+.log-row.deny{background:color-mix(in srgb,var(--red-line) 14%,transparent);cursor:pointer}
+.log-row.deny .res{color:var(--red-text)}
+.log-row.deny .detail{font-weight:600}
+.log-row.deny:hover{background:color-mix(in srgb,var(--red-line) 22%,transparent)}
+.log-row.deny.active{box-shadow:inset 3px 0 0 var(--red-line)}
+.log-row.na .res{color:var(--idle-text)}
+.log-row.na .detail{color:var(--text-dim)}
+
+/* ── Controls ───────────────────────────────────────────────────────────── */
+#controls-main{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+  gap:6px;margin-bottom:10px;flex:0 0 auto}
+#controls-validate{margin-bottom:10px;flex:0 0 auto}
+#controls-validate .admin-btn{width:100%;text-align:center;font-size:13px;padding:11px}
+.admin-btn{padding:9px 11px;border:1px solid var(--border-strong);border-radius:6px;
+  background:var(--panel-bg);color:var(--text);font-family:var(--sans);font-size:12px;
+  font-weight:600;cursor:pointer;text-align:left;line-height:1.35;
+  transition:background .15s,border-color .15s}
+.admin-btn:hover:not(:disabled){border-color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.admin-btn:disabled{opacity:.5;cursor:progress}
+.admin-btn .sec-tag{color:var(--text-dim);font-size:10.5px;font-weight:400;
+  font-family:var(--font)}
+/* Copy feedback: the button itself confirms, so there is no toast to miss. */
+.admin-btn.copied{border-color:var(--green-line);
+  background:color-mix(in srgb,var(--green-line) 16%,transparent);color:var(--green-text)}
+.admin-btn.copied .sec-tag{color:var(--green-text)}
+.admin-btn.primary{border-color:var(--green-line);color:var(--green-text);
+  background:color-mix(in srgb,var(--green-line) 10%,transparent)}
+.admin-btn.primary:hover:not(:disabled){background:color-mix(in srgb,var(--green-line) 20%,transparent)}
+.admin-btn.danger{border-color:var(--red-line);color:var(--red-text);
+  background:color-mix(in srgb,var(--red-line) 8%,transparent)}
+.admin-btn.danger:hover:not(:disabled){background:color-mix(in srgb,var(--red-line) 18%,transparent)}
+.admin-btn.danger .sec-tag{color:var(--red-text);opacity:.75}
+
+/* ── Inert-by-construction panel ────────────────────────────────────────── */
+.inert-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
+.inert-item{border:1px solid var(--border);border-radius:6px;padding:11px 12px;
+  background:color-mix(in srgb,var(--idle-line) 6%,transparent);min-width:0}
+.inert-head{font-size:11px;font-weight:700;letter-spacing:.05em;display:flex;
+  align-items:center;gap:7px;margin-bottom:6px;color:var(--text)}
+.inert-body{font-size:11.5px;line-height:1.65;color:var(--text-dim)}
+.inert-body b{color:var(--text);font-weight:600}
+.inert-body code{font-family:var(--font);font-size:11px;color:var(--accent)}
+
+/* ── Report tables ──────────────────────────────────────────────────────── */
+/* The reference pane is a REPORT on what was validated, not another surface to
+   act on. Rows and columns rather than cards, so it reads as output. */
+table.report{width:100%;border-collapse:collapse;font-size:12px}
+table.report th{text-align:left;font-size:10.5px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--text-dim);padding:6px 10px;
+  border-bottom:1px solid var(--border-strong);white-space:nowrap}
+table.report td{padding:8px 10px;border-bottom:1px solid var(--border);
+  vertical-align:top;color:var(--text)}
+table.report tr:last-child td{border-bottom:0}
+table.report .role{font-weight:700;white-space:nowrap}
+table.report .mono{font-family:var(--font);font-size:11px}
+table.report .id{word-break:break-all;color:var(--text-dim)}
+table.report .muted{color:var(--text-dim);font-size:11.5px}
+table.report tr.bad td{background:color-mix(in srgb,var(--red-line) 12%,transparent)}
+table.report tr.bad .role,table.report tr.bad .id{color:var(--red-text)}
+
+/* The whole reference pane sits apart from the app above it. */
+#reference{background:color-mix(in srgb,var(--idle-line) 5%,var(--panel-bg));
+  border-top:2px solid var(--border-strong)}
+
+/* ── Agent roster ───────────────────────────────────────────────────────── */
+.roster{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
+.acct-card{border:1px solid var(--border);border-radius:6px;padding:11px 12px;
+  background:var(--panel-bg);min-width:0}
+.acct-card .role{font-size:10px;font-weight:700;letter-spacing:.07em;color:var(--text-dim)}
+.acct-card .cn{font-family:var(--font);font-size:11px;color:var(--text);margin-top:5px;
+  word-break:break-all;line-height:1.4}
+.acct-card .meta{font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.7}
+.acct-card .meta b{color:var(--text-dim);font-weight:600}
+.acct-card .meta span{color:var(--text)}
+.acct-card.bad{border-color:var(--red-line);
+  background:color-mix(in srgb,var(--red-line) 10%,transparent)}
+.acct-card.bad .cn{color:var(--red-text)}
+
+/* ── Audit strip ────────────────────────────────────────────────────────── */
+.audit-strip{display:flex;align-items:center;gap:10px;padding:10px 14px;
+  border:1px solid var(--border);border-radius:8px;background:var(--panel-bg);
+  font-size:12px;font-family:var(--font)}
+.audit-strip.valid{color:var(--green-text);border-color:var(--green-line);
+  background:color-mix(in srgb,var(--green-line) 10%,transparent)}
+.audit-strip.broken{color:var(--red-text);border-color:var(--red-line);
+  background:color-mix(in srgb,var(--red-line) 14%,transparent)}
+
+/* Audit entries, one row each. */
+.audit-list{margin-top:10px;font-family:var(--font);font-size:11px}
+.audit-row{display:grid;grid-template-columns:26px 66px 1fr 96px;gap:10px;
+  padding:5px 8px;border-bottom:1px solid var(--border);align-items:baseline}
+.audit-row .ln{color:var(--text-dim)}
+.audit-row .res{font-weight:700}
+.audit-row .res.ok{color:var(--green-text)}
+.audit-row .res.bad{color:var(--red-text)}
+.audit-row .detail{color:var(--text);word-break:break-word}
+.audit-row .hash{color:var(--text-dim);text-align:right}
+
+/* ── Stated limits / footer ─────────────────────────────────────────────── */
+.limits{font-size:11.5px;color:var(--text-dim);line-height:1.85}
+.limits b{color:var(--text);font-weight:600}
+footer{font-size:11px;color:var(--text-dim);text-align:center;padding:14px 0;
+  border-top:1px solid var(--border);line-height:1.8}
+footer a{color:var(--accent);text-decoration:none;font-weight:600}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- Same pattern as resume.html, with two deliberate differences:
+       · href is ../index.html — this page lives one level down at /a2a/, so a
+         bare index.html would link to itself.
+       · shared.css is NOT linked. Referencing it would break the single-file
+         and offline properties, so the ~6 lines of styling are reproduced in
+         the palette above instead.
+       · no inline onclick. A CSP cannot hash an inline event handler — it
+         needs 'unsafe-hashes', which weakens the whole policy for one link.
+         The behaviour is attached from the module script instead. -->
+  <a class="back" id="back-link" href="../index.html">&larr; Portfolio</a>
+
+  <header id="header">
+    <div class="brand-block">
+      <img id="shield" src="./assets/shield-64.png" alt="PhalanxAI Security" width="40" height="40">
+      <div>
+      <div class="brand">A2A TRUST PLAYGROUND</div>
+      <div class="brand-sub">MINT AN IDENTITY · DELEGATE A NARROWER ONE · WATCH IT REFUSE</div>
+      </div>
+    </div>
+    <div class="head-right">
+      <span><span class="dot green" id="privacy-dot"></span> <span id="privacy-text">IN-BROWSER ONLY</span></span>
+      <a id="draft-link" href="https://datatracker.ietf.org/doc/draft-tonyai-a2a-trust/" target="_blank" rel="noopener">DRAFT-TONYAI-A2A-TRUST-02</a>
+      <a id="src-link" href="https://github.com/tonyt68/a2a-trust-playground" target="_blank" rel="noopener">READ THE SOURCE ↗</a>
+      <span id="build-stamp"></span>
+    </div>
+  </header>
+
+  <!-- One line, not a lecture. The panes below carry the rest. -->
+  <p id="howto"><b>A trust chain was just minted in your browser</b> — real RSA keys,
+    real X.509, nothing transmitted. <b>Edit</b> it on the left or use a modify button
+    below, then <b>Validate</b> to re-run all nine checks. Green changes stay valid;
+    red ones are refused and name the clause of the draft that refused them.</p>
+
+  <div id="verdict" class="idle">
+    <span class="b-corner tl">&#9700;</span><span class="b-corner tr">&#9701;</span>
+    <span class="b-corner bl">&#9699;</span><span class="b-corner br">&#9698;</span>
+    <div class="banner-inner" id="verdict-inner">
+      <div class="banner-main">READY</div>
+      <div class="banner-sub">SEEDING A CHAIN&hellip;</div>
+    </div>
+  </div>
+
+  <div id="main">
+    <!-- ── EDIT ──────────────────────────────────────────────────────────── -->
+    <div class="panel">
+      <div class="panel-title"><span>EDIT — THE DOCUMENT IS THE SOURCE OF TRUTH</span>
+        <span class="hint" id="editor-hint">every panel is a view over this JSON</span></div>
+      <div id="controls-main"></div>
+      <div id="editor-wrap">
+        <div id="gutter" aria-hidden="true"></div>
+        <textarea id="doc" spellcheck="false" autocomplete="off" autocorrect="off"
+          autocapitalize="off" aria-label="chain document"></textarea>
+      </div>
+    </div>
+
+    <!-- ── VALIDATE ──────────────────────────────────────────────────────── -->
+    <div class="panel">
+      <div class="panel-title"><span>VALIDATE — NINE CHECKS, FIVE PHASES</span>
+        <span class="hint">click a refusal to jump to the field</span></div>
+      <div id="controls-validate"></div>
+      <div id="pipeline" aria-label="validation flow"></div>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title"><span>TRY IT</span></div>
+    <p class="section-lede">Each button edits the document, jumps to the line it changed,
+      then re-validates. <b class="k-ok">Green</b> makes a change the draft permits &mdash; the
+      chain stays valid. <b class="k-no">Red</b> makes one it refuses, and the result names the
+      clause. Grouped by the step of the chain each one exercises.</p>
+    <div id="controls-phases"></div>
+  </div>
+
+  <div class="panel" id="reference">
+    <div class="panel-title" id="ref-tabs"></div>
+    <div id="ref-body"></div>
+  </div>
+
+  <footer id="footer"></footer>
+</div>
+
+<script type="module" src="./src/app.js"></script>
+</body>
+</html>

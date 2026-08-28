@@ -1,0 +1,396 @@
+/**
+ * End-to-end regression suite — drives the BUILT single file in a real browser.
+ *
+ * Everything here was, at some point this build, a bug found by clicking around
+ * by hand: the vanishing agent roster, the CSP blocking the back link, the
+ * flow blaming the wrong subject, the page growing to 4000px. Unit tests were
+ * green through all of it, because none of those are questions a unit test asks.
+ *
+ * Runs against dist/a2a.html over file:// with the network DISCONNECTED, which
+ * is the strictest environment the page ever sees and the one that proves the
+ * "nothing leaves your browser" claim rather than asserting it.
+ *
+ *   pnpm test:e2e
+ *
+ * Uses the system Chrome rather than a downloaded browser, and skips with a
+ * clear message if it is absent — a missing browser must not read as a failure.
+ */
+import { chromium } from 'playwright';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const BUILT = fileURLToPath(new URL('../../dist/a2a.html', import.meta.url));
+
+if (!existsSync(BUILT)) {
+  console.error('dist/a2a.html is missing — run `pnpm build` first.');
+  process.exit(1);
+}
+if (!existsSync(CHROME)) {
+  console.log('SKIP: Google Chrome not found at the expected path.');
+  process.exit(0);
+}
+
+let passed = 0;
+const failures = [];
+const ok = (name, cond, detail = '') => {
+  if (cond) { passed += 1; console.log(`  ok    ${name}`); }
+  else { failures.push(`${name}${detail ? ` — ${detail}` : ''}`); console.log(`  FAIL  ${name}${detail ? ` — ${detail}` : ''}`); }
+};
+const section = (t) => console.log(`\n${t}`);
+
+const browser = await chromium.launch({ executablePath: CHROME });
+const context = await browser.newContext({ viewport: { width: 1500, height: 1000 } });
+await context.setOffline(true);           // the page must never need the network
+const page = await context.newPage();
+
+const consoleErrors = [];
+const requests = [];
+page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+page.on('pageerror', (e) => consoleErrors.push(`PAGEERROR: ${e.message}`));
+page.on('request', (r) => requests.push(r.url()));
+
+const btn = (label) => page.evaluate((l) => {
+  const b = [...document.querySelectorAll('.admin-btn')].find((x) => x.firstChild.textContent === l);
+  if (!b) throw new Error(`no button: ${l}`);
+  b.click();
+}, label);
+const settle = () => page.waitForFunction(
+  () => ![...document.querySelectorAll('.admin-btn')].some((b) => b.disabled), { timeout: 40000 });
+const click = async (label) => { await btn(label); await settle(); };
+const verdict = () => page.evaluate(() => document.querySelector('.banner-main')?.textContent);
+const code = () => page.evaluate(() =>
+  (document.querySelector('.banner-code')?.textContent || '').split(' · ')[0]);
+const flow = () => page.evaluate(() => [...document.querySelectorAll('#pipeline .p-box')]
+  .map((b) => `${b.querySelector('.p-name').textContent}=${b.querySelector('.p-sub').textContent}`));
+
+// ── Load ──────────────────────────────────────────────────────────────────
+await page.goto(`file://${BUILT}`);
+// Wait for the seed to COMPLETE, not merely for the buttons to exist. Waiting
+// on `settle()` alone raced the initial mint and read a blank editor.
+await page.waitForFunction(
+  () => document.querySelector('.banner-main')?.textContent === 'NOT VALIDATED'
+    && ![...document.querySelectorAll('.admin-btn')].some((b) => b.disabled),
+  { timeout: 40000 });
+
+section('load');
+ok('seeds a chain without validating it', await verdict() === 'NOT VALIDATED', await verdict());
+ok('flow starts with nothing claimed', (await flow()).every((f) => f.endsWith('=—')));
+ok('editor holds a parseable document', await page.evaluate(() => {
+  try { const d = JSON.parse(document.getElementById('doc').value); return Array.isArray(d.chain) && d.chain.length === 3; }
+  catch { return false; }
+}));
+ok('roster shows the seeded agents before any validation',
+  await page.evaluate(() => document.querySelectorAll('#ref-body table.report tbody tr').length) === 3);
+
+// ── Validate ──────────────────────────────────────────────────────────────
+section('validate');
+await click('Validate');
+ok('a fresh chain validates', await verdict() === 'ALL STAGES PASSED', await code());
+ok('all six walk steps are VALID', (await flow()).every((f) => f.endsWith('=VALID')), (await flow()).join(' '));
+ok('nine stages logged, none skipped',
+  await page.evaluate(() => [...document.querySelectorAll('#log .log-row')]
+    .filter((r) => r.children[2].textContent === 'PASS').length) === 9);
+ok('audit chain gains an entry',
+  await page.evaluate(() => /1 entr/.test(document.querySelector('.ref-tab:nth-child(2)').textContent)));
+
+// ── Modifications the draft ALLOWS ────────────────────────────────────────
+section('modifications the draft allows — must stay valid');
+const allowed = await page.evaluate(() =>
+  [...document.querySelectorAll('#controls-allowed .admin-btn, .phase-grid .admin-btn.ok')]
+    .map((b) => b.firstChild.textContent));
+for (const label of allowed) {
+  await click('Reset Certs');
+  await click('Validate');
+  await click(label);
+  await click('Validate');
+  ok(`allowed: ${label}`, await verdict() === 'ALL STAGES PASSED', await code());
+}
+
+// ── Modifications the draft REFUSES ───────────────────────────────────────
+section('modifications the draft refuses — must name the clause');
+const EXPECTED = {
+  'Disable the agent': 'ERR_AGENT_DISABLED',
+  'Forge the issuer': 'ERR_FORGED_ISSUER',
+  'Corrupt the certificate': 'ERR_CHAIN_INVALID',
+  'Revoke the parent': 'ERR_AGENT_REVOKED',
+  'Expire the cert': 'ERR_TTL_EXPIRED',
+  'Sign with one key only': 'ERR_PA_SIG_MISSING',
+  'Tamper with the policy doc': 'ERR_PA_SIG_INVALID',
+  'Alter the stored hash only': 'ERR_CONTENT_HASH',
+  'Edit can_spawn via policy': 'ERR_IMMUTABLE_FIELD',
+  'Submit as the wrong owner': 'ERR_OWNER_MISMATCH',
+  'Escalate the scope': 'ERR_SCOPE_ESCALATION',
+  'Exceed max_children': 'ERR_MAX_CHILDREN',
+  'Spawn a non-whitelisted child': 'ERR_CHILD_NOT_WHITELISTED',
+  'Widen policy past the ceiling': 'ERR_POLICY_EXCEEDS_TEMPLATE',
+  'Alter an audit entry': 'ERR_AUDIT_CHAIN_BROKEN',
+};
+for (const [label, expected] of Object.entries(EXPECTED)) {
+  await click('Reset Certs');
+  await click('Validate');                       // seeds an audit entry to tamper with
+  await click(label);
+  await click('Validate');
+  const got = await code();
+  ok(`refused: ${label}`, (await verdict()) === 'DENIED' && got === expected, `expected ${expected}, got ${got}`);
+  const marked = await page.evaluate(() => !!document.querySelector('#gutter .g-line.bad'));
+  const isAudit = label === 'Alter an audit entry';
+  ok(`  ${label} → marks the offending line`, marked || isAudit);
+  const denies = await page.evaluate(() => document.querySelectorAll('#log .log-row.deny').length);
+  ok(`  ${label} → exactly one DENY row`, denies === 1, `${denies} rows`);
+  const refused = (await flow()).filter((f) => f.endsWith('=REFUSED')).length;
+  ok(`  ${label} → the walk stops at one step`, refused === 1, `${refused} refused`);
+}
+
+// ── Freeform edits in the editor (AC-14) ──────────────────────────────────
+// The buttons are shortcuts; the editor is the primary surface. DESIGN.md is
+// explicit that the freeform path must reach the same verdict as the preset —
+// so these type into the textarea rather than pressing anything.
+section('freeform edits — typing into the document');
+
+/** Replace text in the editor the way a person editing it would. */
+const editDocument = (find, replace, occurrence = 1) => page.evaluate(([f, r, n]) => {
+  const box = document.getElementById('doc');
+  let seen = 0;
+  box.value = box.value.replace(new RegExp(f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
+    (m) => (++seen === n ? r : m));
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  return seen >= n;
+}, [find, replace, occurrence]);
+
+// GREEN: a hand edit the draft permits. template_version is neither signed nor
+// bounded, so changing it must leave the chain valid.
+await click('Reset Certs');
+await click('Validate');
+ok('green edit: found the field to change', await editDocument('"template_version": "1.0"', '"template_version": "1.1"', 1));
+await click('Validate');
+ok('green edit: hand-edited template_version stays VALID',
+  await verdict() === 'ALL STAGES PASSED', await code());
+ok('green edit: the change really is in the document',
+  await page.evaluate(() => document.getElementById('doc').value.includes('"template_version": "1.1"')));
+
+// RED-1: edit ONE copy of the child's bounds and not its duplicate. This is the
+// most likely hand-editing mistake, and it must be refused rather than silently
+// resolved in the editor's favour.
+await click('Reset Certs');
+await click('Validate');
+await page.evaluate(() => {
+  const box = document.getElementById('doc');
+  const d = JSON.parse(box.value);
+  const child = d.chain.find((n) => n.metadata?.parent_agent_id);
+  child.metadata.allowed_scopes = ['admin:all'];   // top-level copy only
+  box.value = JSON.stringify(d, null, 2);
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+});
+await click('Validate');
+ok('red edit: bounds copies disagreeing is refused, not reconciled',
+  await verdict() === 'DENIED' && (await code()) === 'ERR_BOUNDS_UNPARSEABLE', await code());
+
+// RED-2: widen the child properly — both copies and the request — so the run
+// reaches §8.3. This is AC-14: the freeform path must reach the same verdict as
+// the preset button.
+await click('Reset Certs');
+await click('Validate');
+await page.evaluate(() => {
+  const box = document.getElementById('doc');
+  const d = JSON.parse(box.value);
+  const child = d.chain.find((n) => n.metadata?.parent_agent_id);
+  child.metadata.allowed_scopes = ['admin:all'];
+  child.metadata.authorization_bounds.allowed_scopes = ['admin:all'];
+  child.requested_scopes = ['admin:all'];
+  delete d.policy_update;             // isolate §8.3 from the §7.2 ceiling
+  box.value = JSON.stringify(d, null, 2);
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+});
+await click('Validate');
+const redCode = await code();
+ok('red edit: hand-widened child scope is REFUSED (AC-14)',
+  await verdict() === 'DENIED' && redCode === 'ERR_SCOPE_ESCALATION', `got ${redCode}`);
+ok('red edit: the refusal cites §8.3',
+  await page.evaluate(() => (document.querySelector('.banner-code')?.textContent || '').includes('§8.3')));
+ok('red edit: the walk names DELEGATION',
+  (await flow()).some((f) => f.startsWith('DELEGATION') && f.endsWith('=REFUSED')), (await flow()).join(' '));
+ok('red edit: the editor line is marked',
+  await page.evaluate(() => !!document.querySelector('#gutter .g-line.bad')));
+
+// RED: a broken document must refuse cleanly, never throw.
+await click('Reset Certs');
+await editDocument('"chain": [', '"chain": [ {{{', 1);
+await click('Validate');
+ok('red edit: unparseable JSON is a clean DENY, not a crash',
+  await verdict() === 'DENIED' && (await code()) === 'ERR_MALFORMED_JSON', await code());
+
+// ── Reset ─────────────────────────────────────────────────────────────────
+section('reset');
+await click('Reset Certs');
+await click('Validate');
+ok('reset returns a broken chain to valid', await verdict() === 'ALL STAGES PASSED');
+ok('reset clears every report flag',
+  await page.evaluate(() => document.querySelectorAll('table.report tr.bad').length) === 0);
+
+// ── Reference tabs ────────────────────────────────────────────────────────
+section('reference tabs');
+const tabs = await page.evaluate(() =>
+  [...document.querySelectorAll('.ref-tab')].map((t) => t.childNodes[0].textContent.trim()));
+ok('three tabs', tabs.length === 3, tabs.join('|'));
+for (const t of tabs) {
+  await page.evaluate((x) => [...document.querySelectorAll('.ref-tab')]
+    .find((b) => b.childNodes[0].textContent.trim() === x).click(), t);
+  const filled = await page.evaluate(() => document.getElementById('ref-body').textContent.trim().length);
+  ok(`tab renders: ${t}`, filled > 40, `${filled} chars`);
+}
+await page.evaluate(() => [...document.querySelectorAll('.ref-tab')]
+  .find((b) => b.childNodes[0].textContent.trim() === 'Agents').click());
+ok('returning to Agents keeps the roster',
+  await page.evaluate(() => document.querySelectorAll('#ref-body table.report tbody tr').length) === 3);
+
+// ── Privacy and export guarantees ─────────────────────────────────────────
+section('privacy and export (AC-10, AC-12)');
+const external = requests.filter((u) => !u.startsWith('file://'));
+ok('no external network request, ever', external.length === 0, external[0]);
+ok('no cookies', await page.evaluate(() => document.cookie) === '');
+ok('no localStorage or sessionStorage', await page.evaluate(() => {
+  try { return localStorage.length === 0 && sessionStorage.length === 0; } catch { return true; }
+}));
+ok('no download links', await page.evaluate(() => document.querySelectorAll('a[download]').length) === 0);
+ok('Copy JSON is present as the only export',
+  await page.evaluate(() => [...document.querySelectorAll('.admin-btn')]
+    .some((b) => b.firstChild.textContent === 'Copy JSON')));
+
+// ── Navigation ────────────────────────────────────────────────────────────
+section('navigation');
+ok('back link points one level up, at the filename',
+  await page.evaluate(() => document.querySelector('.back').getAttribute('href')) === '../index.html');
+
+// ── Layout ────────────────────────────────────────────────────────────────
+section('layout');
+for (const width of [1600, 1280, 1024, 820, 640]) {
+  await page.setViewportSize({ width, height: 1000 });
+  const bad = await page.evaluate(() =>
+    document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+  ok(`no horizontal overflow at ${width}px`, !bad);
+}
+await page.setViewportSize({ width: 1500, height: 1000 });
+ok('page stays a sane height', await page.evaluate(() => document.documentElement.scrollHeight) < 3200);
+
+// ── Browser-side security properties ──────────────────────────────────────
+//
+// The unit suite proves the VALIDATOR refuses hostile documents. These prove the
+// PAGE cannot be turned into a weapon by one — a different question, because a
+// correctly-refused document is still rendered: its fields appear in the editor,
+// in the highlight, and in the error banner. Rendering attacker-controlled text
+// is where a validator becomes an XSS vector.
+//
+// These run against the BUILT single file at file://, which is how it ships.
+section('browser security');
+
+// Every string the page renders comes from the document, so the payloads go into
+// fields the UI is known to display: the banner, the flow, the audit table.
+const BASELINE_ELEMENTS = await page.evaluate(() =>
+  document.querySelectorAll('img, iframe, svg, object, embed').length);
+
+const XSS = [
+  '<img src=x onerror="window.__pwned=1">',
+  '<script>window.__pwned=1<\/script>',
+  '"><svg onload="window.__pwned=1">',
+  'javascript:window.__pwned=1',
+  '<iframe src="javascript:window.__pwned=1">',
+  '<img src=x onerror=window.__pwned=1>',
+  '{{constructor.constructor("window.__pwned=1")()}}',
+  '<a href="https://evil.example">click</a>',
+];
+
+for (const payload of XSS) {
+  await page.evaluate((p) => {
+    const box = document.getElementById('doc');
+    const d = JSON.parse(box.value);
+    const child = d.chain.find((n) => n.role === 'agent' && n.metadata?.parent_agent_id);
+    // Owner and description are free text in the draft, so they are the fields a
+    // real attacker would reach for.
+    child.metadata.owner = p;
+    if (d.policy_doc) d.policy_doc.description = p;
+    box.value = JSON.stringify(d, null, 2);
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+  }, payload);
+  await click('Validate');
+
+  const pwned = await page.evaluate(() => window.__pwned === 1);
+  ok(`XSS payload does not execute: ${payload.slice(0, 34)}`, !pwned);
+}
+
+// The payloads above are inert only because nothing builds DOM from strings.
+// Assert the mechanism, not just the outcome — the outcome would also hold by
+// luck if a payload happened not to fire.
+// The page ships one legitimate inline <svg> (the shield). What matters is that
+// the count did not MOVE while eight payloads were rendered — an absolute zero
+// would be asserting the page has no graphics, which is a different claim.
+ok('no injected element entered the DOM while payloads were rendered',
+  await page.evaluate(() => document.querySelectorAll('img, iframe, svg, object, embed').length) === BASELINE_ELEMENTS,
+  `baseline ${BASELINE_ELEMENTS}`);
+ok('no <script> beyond the single inlined bundle',
+  await page.evaluate(() => document.querySelectorAll('script').length) === 1);
+ok('no inline event handler exists anywhere in the page',
+  await page.evaluate(() => [...document.querySelectorAll('*')]
+    .every((n) => ![...n.attributes].some((a) => a.name.startsWith('on')))));
+ok('every link is http(s) or a same-file anchor',
+  await page.evaluate(() => [...document.querySelectorAll('a[href]')]
+    .every((a) => /^(https?:|#|\.\.?\/)/.test(a.getAttribute('href')))));
+ok('external links carry rel=noopener',
+  await page.evaluate(() => [...document.querySelectorAll('a[target="_blank"]')]
+    .every((a) => (a.getAttribute('rel') || '').includes('noopener'))));
+
+// "Point some poor soul at a URL that preloads a hostile document" is the attack
+// that would make this page a delivery mechanism. It is impossible only because
+// the page reads no URL input at all — so that is what gets asserted.
+ok('the page reads nothing from the URL',
+  await page.evaluate(() => {
+    const src = document.querySelector('script:not([src])')?.textContent ?? '';
+    return !/location\.(search|hash)|URLSearchParams|new URL\(location/.test(src);
+  }));
+const withHostileUrl = `${BUILT}#${encodeURIComponent(JSON.stringify({ chain: [{ role: 'ca' }] }))}`;
+const probe = await context.newPage();
+await probe.goto(`file://${withHostileUrl}?doc=${encodeURIComponent('{"chain":[]}')}`);
+await probe.waitForFunction(() => document.getElementById('doc')?.value.length > 0);
+ok('a document supplied in the URL is ignored',
+  (await probe.evaluate(() => JSON.parse(document.getElementById('doc').value).chain.length)) === 3);
+await probe.close();
+
+// Nothing is transmitted. Asserted against the real request log for the whole
+// run, not against a claim in the page copy.
+ok('no network request beyond the file itself',
+  requests.filter((u) => !u.startsWith('file://')).length === 0,
+  requests.filter((u) => !u.startsWith('file://')).slice(0, 2).join(' | '));
+ok('no storage written', await page.evaluate(() =>
+  localStorage.length === 0 && sessionStorage.length === 0 && document.cookie === ''));
+
+// The editor is the only input, so it must survive whatever is pasted into it.
+for (const [label, text] of Object.entries({
+  'empty': '',
+  'not JSON': 'hello',
+  'an array root': '[1,2,3]',
+  'truncated': '{"chain":',
+  'invalid escape': '{"\\q": 1}',
+  'a 300-deep nest': '{"n":'.repeat(300) + '1' + '}'.repeat(300),
+})) {
+  await page.evaluate((t) => {
+    const box = document.getElementById('doc');
+    box.value = t;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+  }, text);
+  await click('Validate');
+  const banner = await verdict();
+  ok(`hostile input is refused cleanly, not crashed on: ${label}`,
+    banner === 'DENIED' || banner === 'INVALID DOCUMENT', banner);
+}
+
+await click('Reset Certs');
+
+// ── Console ───────────────────────────────────────────────────────────────
+section('console');
+ok('no console or page errors across the whole run',
+  consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '));
+
+await browser.close();
+
+console.log(`\n${passed} passed, ${failures.length} failed`);
+if (failures.length) { for (const f of failures) console.log(`  FAILED: ${f}`); process.exit(1); }

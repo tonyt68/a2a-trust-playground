@@ -1,0 +1,29 @@
+{
+  "name": "a2a-trust-playground",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser playground for draft-tonyai-a2a-trust — mint an agent identity, delegate a narrower one, watch it refuse escalation",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "vectors": "python3 scripts/gen_canonical_vectors.py",
+    "fixtures": "sh scripts/gen-cert-fixtures.sh",
+    "pretest": "sh scripts/gen-cert-fixtures.sh >/dev/null",
+    "dev": "node scripts/serve.mjs",
+    "build": "node scripts/build.mjs",
+    "test:e2e": "pnpm build && node tests/e2e/run.mjs",
+    "test:all": "pnpm test && pnpm test:e2e && pnpm test:roundtrip",
+    "test:roundtrip": "node scripts/roundtrip-export.mjs && python3 scripts/roundtrip.py"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright": "1.62.1",
+    "vitest": "3.2.6"
+  },
+  "dependencies": {
+    "asn1js": "3.0.10",
+    "pkijs": "3.4.0"
+  }
+}

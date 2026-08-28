@@ -1,0 +1,41 @@
+# Design docs — private while in draft (DESIGN.md moves to docs/ on public release)
+docs/private/
+
+# Secrets / config
+.env
+.env.*
+!.env.example
+
+# Key + certificate material — generated at runtime in the browser, never committed.
+# Test vectors carry PUBLIC material only.
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+certs/
+
+# Terraform (unused here but standard portfolio guard)
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+.terraform/
+
+# Node
+node_modules/
+dist/
+
+# Test / tooling artifacts
+.vitest/
+playwright-report/
+test-results/
+ui-check-out/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
