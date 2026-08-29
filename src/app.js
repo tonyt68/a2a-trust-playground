@@ -106,10 +106,31 @@ function revealLine(lineNumber) {
   if (!range) return;
   docBox.focus();
   docBox.setSelectionRange(range.start, range.end);
+  scrollLineIntoView(lineNumber, { always: true });
+  renderGutter(lineNumber);
+}
+
+/**
+ * Bring a line into view WITHOUT taking focus or moving the caret.
+ *
+ * Validation needs this and a deliberate click does not. Clicking a log row is
+ * the visitor asking to go somewhere, so `revealLine` selects the text and
+ * takes focus. Pressing Validate is not that request — but marking a line the
+ * visitor cannot see is worse than not marking one, because the banner says
+ * DENIED and the marker points at nothing on screen. Measured before this
+ * existed: scroll to the top, escalate a scope, press Validate, and the marker
+ * landed on line 68 while the editor was showing lines 1 to 28.
+ *
+ * Scrolls only when the line is genuinely off-screen, so re-validating a
+ * document whose failure is already visible does not jump the view out from
+ * under someone mid-read.
+ */
+function scrollLineIntoView(lineNumber, { always = false } = {}) {
   const lh = parseFloat(getComputedStyle(docBox).lineHeight) || 17;
+  const y = (lineNumber - 1) * lh;
+  if (!always && y >= docBox.scrollTop && y <= docBox.scrollTop + docBox.clientHeight - lh) return;
   docBox.scrollTop = Math.max(0, (lineNumber - 3) * lh);
   gutter.scrollTop = docBox.scrollTop;
-  renderGutter(lineNumber);
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────
@@ -513,10 +534,11 @@ async function verify() {
   renderLog(result);
   renderReference(result);
 
-  // Put the gutter marker on the offending line without stealing focus.
+  // Mark the offending line AND bring it on screen, without stealing focus.
   const line = result.verdict === 'DENY'
     ? locateFailure(docBox.value, failureLocation(result)) : null;
   renderGutter(line);
+  if (line) scrollLineIntoView(line);
   return result;
 }
 

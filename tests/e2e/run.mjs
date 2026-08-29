@@ -273,6 +273,65 @@ for (const width of [1600, 1280, 1024, 820, 640]) {
 await page.setViewportSize({ width: 1500, height: 1000 });
 ok('page stays a sane height', await page.evaluate(() => document.documentElement.scrollHeight) < 3200);
 
+// ── The refusal has to be visible ─────────────────────────────────────────
+//
+// A gutter marker the visitor cannot see is worse than no marker: the banner
+// says DENIED and points at nothing on screen. Measured before this was fixed —
+// scroll to the top, escalate a scope, press Validate, and the marker landed on
+// line 68 while the editor was showing lines 1 to 28.
+section('the marked line is brought into view');
+
+const lineState = () => page.evaluate(() => {
+  const box = document.getElementById('doc');
+  const bad = document.querySelector('#gutter .g-line.bad');
+  const lh = parseFloat(getComputedStyle(box).lineHeight) || 17;
+  const line = bad ? [...document.querySelectorAll('#gutter .g-line')].indexOf(bad) + 1 : null;
+  return {
+    line,
+    from: Math.floor(box.scrollTop / lh) + 1,
+    to: Math.floor((box.scrollTop + box.clientHeight) / lh) + 1,
+    scrollTop: box.scrollTop,
+    focused: document.activeElement?.id === 'doc',
+    selected: box.selectionEnd - box.selectionStart,
+  };
+});
+
+for (const label of ['Escalate the scope', 'Sign with one key only',
+                     'Submit as the wrong owner', 'Expire the cert']) {
+  await click('Reset Certs');
+  await click(label);
+  // The visitor scrolls elsewhere before validating, which is entirely normal.
+  await page.evaluate(() => { document.getElementById('doc').scrollTop = 0; });
+  await click('Validate');
+  const r = await lineState();
+  ok(`${label} -> marked line is on screen`,
+    r.line !== null && r.line >= r.from && r.line <= r.to,
+    `line ${r.line}, view ${r.from}-${r.to}`);
+}
+
+// Validation is not a request to go there, so it must not take the caret.
+await click('Reset Certs');
+await click('Escalate the scope');
+await page.evaluate(() => {
+  const b = document.getElementById('doc');
+  b.blur(); b.scrollTop = 0;
+});
+await click('Validate');
+const noSteal = await lineState();
+ok('validating does not steal focus', !noSteal.focused);
+ok('validating does not select text', noSteal.selected === 0);
+ok('validating still scrolled to the failure', noSteal.scrollTop > 0);
+
+// And it must not yank the view when the failure is already visible.
+const settled = (await lineState()).scrollTop;
+await page.evaluate(() => { document.getElementById('doc').scrollTop -= 20; });
+const nudged = await page.evaluate(() => document.getElementById('doc').scrollTop);
+await click('Validate');
+ok('re-validating leaves an already-visible failure alone',
+  (await lineState()).scrollTop === nudged, `settled ${settled}, nudged ${nudged}`);
+
+await click('Reset Certs');
+
 // ── Browser-side security properties ──────────────────────────────────────
 //
 // The unit suite proves the VALIDATOR refuses hostile documents. These prove the
