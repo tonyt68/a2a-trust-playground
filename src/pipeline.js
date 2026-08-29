@@ -427,7 +427,22 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
     // The refusal is itself an auditable event. Appending after a failure keeps
     // the chain a record of decisions rather than a record of successes.
     try {
-      await audit.append({ action: 'verify_chain', decision: 'DENIED', reason: deny.code }, now);
+      // Name the agents this run covered. A refusal row that says only
+      // "DENIED verify_chain" attributes the decision to nobody, which is the
+      // one thing an audit record exists to do.
+      // Read the chain from `document`, not from the `agents` binding: that one
+      // is scoped inside the try block, so referencing it here throws a
+      // ReferenceError which the surrounding catch swallows -- and the refusal
+      // silently stops being recorded. Caught by a unit test asserting the DENY
+      // entry exists, which is exactly the assertion a swallowing catch needs.
+      const covered = (document?.chain ?? [])
+        .filter((n) => n.role === 'agent')
+        .map((n) => n.metadata?.agent_id)
+        .filter(Boolean);
+      await audit.append({
+        action: 'verify_chain', decision: 'DENIED', reason: deny.code,
+        ...(covered.length ? { agents: covered } : {}),
+      }, now);
     } catch { /* an audit failure must not mask the original refusal */ }
   }
 

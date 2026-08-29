@@ -31,13 +31,18 @@ if (!existsSync(CHROME)) {
   process.exit(0);
 }
 
+let lastStep = 'startup';
 let passed = 0;
 const failures = [];
 const ok = (name, cond, detail = '') => {
   if (cond) { passed += 1; console.log(`  ok    ${name}`); }
   else { failures.push(`${name}${detail ? ` — ${detail}` : ''}`); console.log(`  FAIL  ${name}${detail ? ` — ${detail}` : ''}`); }
 };
-const section = (t) => console.log(`\n${t}`);
+const section = (t) => { lastStep = t; console.log(`\n${t}`); };
+
+// `lastStep` is declared above, next to `passed`: "no console errors across the
+// whole run" is a useful assertion and a useless diagnostic, failing at the end
+// of the file having lost all context about which of 150 steps caused it.
 
 const browser = await chromium.launch({ executablePath: CHROME });
 const context = await browser.newContext({ viewport: { width: 1500, height: 1000 } });
@@ -46,8 +51,8 @@ const page = await context.newPage();
 
 const consoleErrors = [];
 const requests = [];
-page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
-page.on('pageerror', (e) => consoleErrors.push(`PAGEERROR: ${e.message}`));
+page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(`[after: ${lastStep}] ${m.text()}`); });
+page.on('pageerror', (e) => consoleErrors.push(`[after: ${lastStep}] PAGEERROR: ${e.message}`));
 page.on('request', (r) => requests.push(r.url()));
 
 const btn = (label) => page.evaluate((l) => {
@@ -80,8 +85,12 @@ ok('editor holds a parseable document', await page.evaluate(() => {
   try { const d = JSON.parse(document.getElementById('doc').value); return Array.isArray(d.chain) && d.chain.length === 3; }
   catch { return false; }
 }));
-ok('roster shows the seeded agents before any validation',
-  await page.evaluate(() => document.querySelectorAll('#ref-body table.report tbody tr').length) === 3);
+// The separate agent roster was removed: it rendered from the last validation
+// and then sat there, so editing a scope left it reporting the old value.
+// Identity now lives on the audit log, which is the record that is actually
+// tamper-evident and cannot drift from the document.
+ok('the audit log carries the seeded entries before any validation',
+  await page.evaluate(() => document.querySelectorAll('.audit-row:not(.head)').length) >= 3);
 
 // ── Validate ──────────────────────────────────────────────────────────────
 section('validate');
@@ -240,7 +249,7 @@ ok('reset clears every report flag',
 section('reference tabs');
 const tabs = await page.evaluate(() =>
   [...document.querySelectorAll('.ref-tab')].map((t) => t.childNodes[0].textContent.trim()));
-ok('three tabs', tabs.length === 3, tabs.join('|'));
+ok('two reference tabs', tabs.length === 2, tabs.join('|'));
 for (const t of tabs) {
   await page.evaluate((x) => [...document.querySelectorAll('.ref-tab')]
     .find((b) => b.childNodes[0].textContent.trim() === x).click(), t);
@@ -248,9 +257,61 @@ for (const t of tabs) {
   ok(`tab renders: ${t}`, filled > 40, `${filled} chars`);
 }
 await page.evaluate(() => [...document.querySelectorAll('.ref-tab')]
-  .find((b) => b.childNodes[0].textContent.trim() === 'Agents').click());
-ok('returning to Agents keeps the roster',
-  await page.evaluate(() => document.querySelectorAll('#ref-body table.report tbody tr').length) === 3);
+  .find((b) => b.childNodes[0].textContent.trim() === 'Audit chain').click());
+ok('returning to the audit chain keeps its rows',
+  await page.evaluate(() => document.querySelectorAll('.audit-row:not(.head)').length) >= 3);
+
+// Identity moved here from the removed roster, so it has to actually be here.
+const auditCols = await page.evaluate(() =>
+  [...document.querySelectorAll('.audit-row.head span')].map((c) => c.textContent.trim()));
+ok('the audit log names the agent and its place in the chain',
+  auditCols.includes('Agent') && auditCols.includes('Relationship'), auditCols.join('|'));
+// Located by HEADER position rather than a hardcoded index: this broke once
+// already when a Time column was inserted ahead of it.
+ok('a spawn entry names the agent and its place in the chain', await page.evaluate(() => {
+  const heads = [...document.querySelectorAll('.audit-row.head span')].map((c) => c.textContent.trim());
+  const agent = heads.indexOf('Agent');
+  const rel = heads.indexOf('Relationship');
+  const row = [...document.querySelectorAll('.audit-row:not(.head)')]
+    .find((r) => r.textContent.includes('spawn_child'));
+  return !!row && agent > -1 && rel > -1
+    && row.children[agent].textContent.trim().length > 20
+    && row.children[rel].textContent.trim() === 'child';
+}));
+
+ok('the root agent reads as parent, not child', await page.evaluate(() => {
+  const heads = [...document.querySelectorAll('.audit-row.head span')].map((c) => c.textContent.trim());
+  const rel = heads.indexOf('Relationship');
+  const row = [...document.querySelectorAll('.audit-row:not(.head)')]
+    .find((r) => r.textContent.includes('issue_template'));
+  return row?.children[rel].textContent.trim() === 'parent';
+}));
+
+// An audit record is read after the session that produced it, so a bare
+// wall-clock time would be ambiguous. The zone is stated rather than assumed.
+ok('timestamps carry a date and state their zone', await page.evaluate(() => {
+  const heads = [...document.querySelectorAll('.audit-row.head span')].map((c) => c.textContent.trim());
+  const when = heads.findIndex((h) => h.startsWith('Timestamp'));
+  const stamped = document.querySelector('.audit-row:not(.head)')?.children[when]?.textContent.trim();
+  return heads[when].includes('UTC') && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(stamped);
+}));
+
+// The chain has to be readable as a chain: each row links to the one above it.
+ok('each entry links to the hash of the entry above it', await page.evaluate(() => {
+  const heads = [...document.querySelectorAll('.audit-row.head span')].map((c) => c.textContent.trim());
+  const linksTo = heads.indexOf('Links to');
+  const hash = heads.indexOf('Hash');
+  const rows = [...document.querySelectorAll('.audit-row:not(.head)')];
+  if (linksTo < 0 || hash < 0 || rows.length < 2) return false;
+  return rows.slice(1).every((r, i) =>
+    r.children[linksTo].textContent.trim() === rows[i].children[hash].textContent.trim());
+}));
+ok('the first entry links to genesis', await page.evaluate(() => {
+  const heads = [...document.querySelectorAll('.audit-row.head span')].map((c) => c.textContent.trim());
+  const linksTo = heads.indexOf('Links to');
+  const first = document.querySelector('.audit-row:not(.head)');
+  return first?.children[linksTo].textContent.trim() === 'genesis';
+}));
 
 // ── Privacy and export guarantees ─────────────────────────────────────────
 section('privacy and export (AC-10, AC-12)');

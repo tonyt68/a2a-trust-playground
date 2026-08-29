@@ -74,7 +74,11 @@ function setDocument(obj, { keepScroll = false } = {}) {
   // Open at the top. Landing on line 154 of the audit chain shows a newcomer
   // base64 blobs and hashes — the least legible part of the document.
   docBox.scrollTop = top;
-  renderGutter();
+  // Every button that changes the document goes through here, so this is the one
+  // place that guarantees the views follow. The previous verdict is discarded
+  // because it describes a document that no longer exists: keeping it would show
+  // a stale BROKEN badge over a chain that was just reset.
+  publish({ result: null, badLine: null });
 }
 
 /** Read the editor. Throws DenyError — the caller renders it as a stage-1 refusal. */
@@ -94,7 +98,95 @@ function renderGutter(badLine = null) {
 }
 
 docBox.addEventListener('scroll', () => { gutter.scrollTop = docBox.scrollTop; });
-docBox.addEventListener('input', () => renderGutter());
+docBox.addEventListener('input', () => publish());
+
+/**
+ * ── View bus: one publish, every view fans out ─────────────────────────────
+ *
+ * There used to be three call sites rendering the same panels from three
+ * different shapes — the validation RESULT after a run, a document after a reset
+ * with `audit: { entries: 0 }` hardcoded, and nothing at all on a hand-edit. So
+ * the roster sat frozen while you typed, and the audit badge read "0 entries"
+ * over a document holding three. That is not carelessness at any one call site;
+ * it is what having three owners of one view produces.
+ *
+ * Now there is one state and one publish. Views subscribe and are re-rendered
+ * together, so a new panel cannot be added and quietly forgotten: it subscribes
+ * or it does not exist. The bus is deliberately tiny — this is a page with four
+ * views, not an application, and a framework here would be more machinery than
+ * the problem has.
+ *
+ * The document is read from the EDITOR every time, which is what the panel
+ * header claims: "every panel is a view over this JSON". The result is carried
+ * alongside for the things a document cannot know about itself — whether the
+ * chain it holds actually verified.
+ */
+const views = [];
+
+/** Subscribe a view. Called once per view at module load. */
+function view(name, fn) { views.push({ name, fn }); }
+
+let busState = { document: null, result: null, badLine: null };
+
+/**
+ * Publish a change. Any field left out keeps its current value, so a caller that
+ * only knows about one part of the state does not have to invent the rest.
+ *
+ * Parsing is best-effort: the editor is invalid JSON on most keystrokes, and on
+ * those the views keep their last good render rather than flickering.
+ */
+function publish(patch = {}) {
+  let doc = busState.document;
+  // parseDocument, not a bare JSON.parse. This is a read for DISPLAY, which is
+  // exactly the reasoning that let a bare parse onto the export path earlier:
+  // the byte cap, the prototype-pollution guard and the depth limit all live in
+  // parseDocument, and a second unguarded entrance to the editor is still a
+  // second entrance. A document too malformed to validate is also a document
+  // whose roster would be misleading to draw.
+  try { doc = parseDocument(docBox.value); } catch { /* keep the last good parse */ }
+  busState = { ...busState, ...patch, document: doc };
+  // Each view is isolated. A fan-out where one failing subscriber takes down the
+  // others is worse than no fan-out: the page would half-render with no
+  // indication which half is stale. A view that throws is reported and skipped;
+  // the rest still draw.
+  for (const { name, fn } of views) {
+    try {
+      fn(busState);
+    } catch (err) {
+      console.error(`view "${name}" failed to render`, err);
+    }
+  }
+}
+
+// ── Subscribers ───────────────────────────────────────────────────────────
+
+view('gutter', ({ badLine }) => renderGutter(badLine));
+
+view('reference', ({ document: doc, result }) => {
+  if (!doc || typeof doc !== 'object') return;
+  renderReference({
+    chain: Array.isArray(doc.chain) ? doc.chain : [],
+    crl: doc.crl ?? { revoked: [], disabled: [] },
+    audit: {
+      entries: doc.audit?.chain?.length ?? 0,
+      chain: doc.audit?.chain ?? [],
+      // The head is the last entry's hash. Derived rather than carried, so the
+      // strip reads the same before a validation as after one instead of
+      // showing "head —" over a chain that plainly has a head.
+      head_hash: doc.audit?.chain?.length
+        ? doc.audit.chain[doc.audit.chain.length - 1].hash : null,
+    },
+    error_code: result?.error_code ?? null,
+    // Carried so the strip can name WHICH entry broke. Without it renderAudit
+    // falls back to "an entry was altered", which is exactly the vagueness the
+    // per-entry marker work was undoing.
+    stages: result?.stages ?? [],
+  });
+});
+
+view('pipeline', ({ result }) => renderPipeline(result));
+
+
 
 /**
  * Scroll to a line and select it — the pattern from the code reviewer UI:
@@ -107,7 +199,7 @@ function revealLine(lineNumber) {
   docBox.focus();
   docBox.setSelectionRange(range.start, range.end);
   scrollLineIntoView(lineNumber, { always: true });
-  renderGutter(lineNumber);
+  publish({ badLine: lineNumber });
 }
 
 /**
@@ -205,6 +297,76 @@ function renderPipeline(result) {
   });
 }
 
+/**
+ * Where in the document a refusal points. The error code implies the field; the
+ * detail string carries the offending values, which the locator falls back to.
+ */
+function failureLocation(result) {
+  const code = result.error_code;
+  const detail = result?.stages?.find((s) => s.result === 'DENY')?.detail ?? '';
+  const quoted = [...detail.matchAll(/[a-z0-9_:-]+:[a-z0-9_:-]+/gi)].map((m) => m[0]);
+
+  const paths = {
+    ERR_POLICY_EXCEEDS_TEMPLATE: 'policy_doc.scopes',
+    ERR_SPAWN_EXCEEDS_TEMPLATE: 'policy_doc.can_spawn',
+    ERR_IMMUTABLE_FIELD: 'policy_doc',
+    ERR_UNKNOWN_POLICY_FIELD: 'policy_doc',
+    ERR_REQUIRED_FIELD: 'policy_doc',
+    ERR_OWNER_MISMATCH: 'policy_doc.owner',
+    ERR_ORG_MISMATCH: 'policy_doc.owner',
+    ERR_CONTENT_HASH: 'policy_content_hash',
+    ERR_POLICY_VERSION: 'version',
+    ERR_PA_SIG_MISSING: 'pa_sig',
+    ERR_PA_SIG_INVALID: 'pa_sig',
+    ERR_OWNER_SIG_MISSING: 'owner_sig',
+    ERR_OWNER_SIG_INVALID: 'owner_sig',
+    ERR_SINGLE_SIGNATURE: 'owner_sig',
+    ERR_AGENT_REVOKED: 'crl.revoked',
+    ERR_TTL_EXPIRED: 'chain[2].metadata.expires_at',
+    ERR_AGENT_DISABLED: 'chain[2].metadata.state',
+    ERR_MAX_CHILDREN: 'chain[1].metadata.max_children',
+    ERR_CHILD_NOT_WHITELISTED: 'chain[1].metadata.can_spawn',
+    ERR_SCOPE_ESCALATION: 'chain[2].metadata.allowed_scopes',
+    ERR_AUDIT_CHAIN_BROKEN: 'audit',
+    // §6 certificate checks. Without these a refusal marks nothing at all,
+    // which is how the basicConstraints and digest checks shipped: they deny
+    // correctly and pointed at no line.
+    ERR_MALFORMED_PEM: 'chain[2].cert_pem',
+    ERR_KEY_TOO_SMALL: 'chain[2].cert_pem',
+    ERR_BASIC_CONSTRAINTS: 'chain[2].cert_pem',
+    ERR_WEAK_SIGNATURE: 'chain[2].cert_pem',
+    ERR_AGENT_ID_FORMAT: 'chain[2].metadata.agent_id',
+    ERR_TIMESTAMP_FORMAT: 'chain[2].metadata.expires_at',
+    ERR_CHAIN_INVALID: 'chain[2].cert_pem',
+    ERR_FORGED_ISSUER: 'chain[2].cert_pem',
+    ERR_SELF_SIGNED: 'chain[2].cert_pem',
+    ERR_CERT_EXPIRED: 'chain[2].cert_pem',
+    ERR_SUBJECT_MISMATCH: 'chain[2].metadata.agent_id',
+    ERR_NAME_CONSTRAINT: 'chain[2].cert_pem',
+    ERR_UNKNOWN_CRITICAL_EXT: 'chain[2].cert_pem',
+    ERR_AUTHORITY_CHAIN: 'authorities',
+    ERR_BOUNDS_UNPARSEABLE: 'chain[2].metadata.authorization_bounds',
+    ERR_EMPTY_SCOPES: 'chain[2].requested_scopes',
+  };
+  let path = paths[code] ?? null;
+
+  // The audit failure knows WHICH entry broke, so point at that entry rather
+  // than at the `audit` container. "entry 0 content was altered" with a marker
+  // on the enclosing object is technically correct and useless on a long chain:
+  // the visitor still has to find the entry themselves.
+  if (code === 'ERR_AUDIT_CHAIN_BROKEN') {
+    const idx = /entry (\d+)/.exec(detail);
+    if (idx) path = `audit.chain[${idx[1]}]`;
+  }
+
+  // Codes with no path are deliberate, not oversights: ERR_MALFORMED_JSON,
+  // ERR_DOCUMENT_TOO_LARGE and ERR_INTERNAL are properties of the document as a
+  // whole, and ERR_SCHEMA_VIOLATION / ERR_FIELD_CHARSET / ERR_FIELD_RANGE can
+  // fire on any of a dozen fields. Guessing one would point confidently at the
+  // wrong line, which is worse than pointing at none.
+  return { path, values: quoted };
+}
+
 /** Which phase each modification button exercises, for grouping the controls. */
 const PHASES = [
   { name: 'IDENTITY',  asks: 'the certificates themselves' },
@@ -287,120 +449,6 @@ function renderLog(result) {
   }
 }
 
-/**
- * Where in the document a refusal points. The error code implies the field; the
- * detail string carries the offending values, which the locator falls back to.
- */
-function failureLocation(result) {
-  const code = result.error_code;
-  const detail = result?.stages?.find((s) => s.result === 'DENY')?.detail ?? '';
-  const quoted = [...detail.matchAll(/[a-z0-9_:-]+:[a-z0-9_:-]+/gi)].map((m) => m[0]);
-
-  const paths = {
-    ERR_POLICY_EXCEEDS_TEMPLATE: 'policy_doc.scopes',
-    ERR_SPAWN_EXCEEDS_TEMPLATE: 'policy_doc.can_spawn',
-    ERR_IMMUTABLE_FIELD: 'policy_doc',
-    ERR_UNKNOWN_POLICY_FIELD: 'policy_doc',
-    ERR_REQUIRED_FIELD: 'policy_doc',
-    ERR_OWNER_MISMATCH: 'policy_doc.owner',
-    ERR_ORG_MISMATCH: 'policy_doc.owner',
-    ERR_CONTENT_HASH: 'policy_content_hash',
-    ERR_POLICY_VERSION: 'version',
-    ERR_PA_SIG_MISSING: 'pa_sig',
-    ERR_PA_SIG_INVALID: 'pa_sig',
-    ERR_OWNER_SIG_MISSING: 'owner_sig',
-    ERR_OWNER_SIG_INVALID: 'owner_sig',
-    ERR_SINGLE_SIGNATURE: 'owner_sig',
-    ERR_AGENT_REVOKED: 'crl.revoked',
-    ERR_TTL_EXPIRED: 'chain[2].metadata.expires_at',
-    ERR_AGENT_DISABLED: 'chain[2].metadata.state',
-    ERR_MAX_CHILDREN: 'chain[1].metadata.max_children',
-    ERR_CHILD_NOT_WHITELISTED: 'chain[1].metadata.can_spawn',
-    ERR_SCOPE_ESCALATION: 'chain[2].metadata.allowed_scopes',
-    ERR_AUDIT_CHAIN_BROKEN: 'audit',
-    // §6 certificate checks. Without these a refusal marks nothing at all,
-    // which is how the basicConstraints and digest checks shipped: they deny
-    // correctly and pointed at no line.
-    ERR_MALFORMED_PEM: 'chain[2].cert_pem',
-    ERR_KEY_TOO_SMALL: 'chain[2].cert_pem',
-    ERR_BASIC_CONSTRAINTS: 'chain[2].cert_pem',
-    ERR_WEAK_SIGNATURE: 'chain[2].cert_pem',
-    ERR_AGENT_ID_FORMAT: 'chain[2].metadata.agent_id',
-    ERR_TIMESTAMP_FORMAT: 'chain[2].metadata.expires_at',
-    ERR_CHAIN_INVALID: 'chain[2].cert_pem',
-    ERR_FORGED_ISSUER: 'chain[2].cert_pem',
-    ERR_SELF_SIGNED: 'chain[2].cert_pem',
-    ERR_CERT_EXPIRED: 'chain[2].cert_pem',
-    ERR_SUBJECT_MISMATCH: 'chain[2].metadata.agent_id',
-    ERR_NAME_CONSTRAINT: 'chain[2].cert_pem',
-    ERR_UNKNOWN_CRITICAL_EXT: 'chain[2].cert_pem',
-    ERR_AUTHORITY_CHAIN: 'authorities',
-    ERR_BOUNDS_UNPARSEABLE: 'chain[2].metadata.authorization_bounds',
-    ERR_EMPTY_SCOPES: 'chain[2].requested_scopes',
-  };
-  let path = paths[code] ?? null;
-
-  // The audit failure knows WHICH entry broke, so point at that entry rather
-  // than at the `audit` container. "entry 0 content was altered" with a marker
-  // on the enclosing object is technically correct and useless on a long chain:
-  // the visitor still has to find the entry themselves.
-  if (code === 'ERR_AUDIT_CHAIN_BROKEN') {
-    const idx = /entry (\d+)/.exec(detail);
-    if (idx) path = `audit.chain[${idx[1]}]`;
-  }
-
-  // Codes with no path are deliberate, not oversights: ERR_MALFORMED_JSON,
-  // ERR_DOCUMENT_TOO_LARGE and ERR_INTERNAL are properties of the document as a
-  // whole, and ERR_SCHEMA_VIOLATION / ERR_FIELD_CHARSET / ERR_FIELD_RANGE can
-  // fire on any of a dozen fields. Guessing one would point confidently at the
-  // wrong line, which is worse than pointing at none.
-  return { path, values: quoted };
-}
-
-function renderRoster(result, container) {
-  // Which agent a refusal names, if any. Marking every row on any DENY was
-  // wrong: revoking the parent flagged the child too, which is the confusion
-  // this table exists to prevent.
-  const detail = result?.stages?.find((s) => s.result === 'DENY')?.detail ?? '';
-  const revoked = new Set([...(result?.crl?.revoked ?? []), ...(result?.crl?.disabled ?? [])]);
-
-  const table = el('table', 'report');
-  const head = el('tr');
-  for (const h of ['Role', 'Identity', 'State', 'Allowed scopes', 'May spawn', 'Max children']) {
-    head.appendChild(el('th', null, h));
-  }
-  table.appendChild(el('thead')).appendChild(head);
-  const body = el('tbody');
-
-  for (const node of result?.chain ?? []) {
-    const meta = node.metadata ?? {};
-    const isAgent = node.role === 'agent';
-    const row = el('tr');
-    const flagged = isAgent && (
-      (typeof meta.agent_id === 'string' && detail.includes(meta.agent_id))
-      || revoked.has(meta.agent_id)
-      || (meta.state && meta.state !== 'ACTIVE'));
-    if (flagged) row.className = 'bad';
-
-    row.appendChild(el('td', 'role', isAgent
-      ? (meta.parent_agent_id ? 'Child agent' : 'Parent agent') : 'Trust anchor'));
-    row.appendChild(el('td', 'mono id', meta.agent_id ?? meta.subject ?? '—'));
-    if (isAgent) {
-      row.appendChild(el('td', 'mono', meta.state ?? '—'));
-      row.appendChild(el('td', 'mono', (meta.allowed_scopes ?? []).join(', ') || '(none)'));
-      row.appendChild(el('td', 'mono', (meta.can_spawn ?? []).length
-        ? `${meta.can_spawn.length} permitted` : '(none)'));
-      row.appendChild(el('td', 'mono', String(meta.max_children ?? '—')));
-    } else {
-      const c = el('td', 'muted', 'self-signed · in no trust store · nameConstraints DEMO ONLY');
-      c.colSpan = 4;
-      row.appendChild(c);
-    }
-    body.appendChild(row);
-  }
-  table.appendChild(body);
-  container.appendChild(table);
-}
 
 function renderAudit(result, container) {
   const broken = result?.error_code === 'ERR_AUDIT_CHAIN_BROKEN';
@@ -412,15 +460,60 @@ function renderAudit(result, container) {
   const strip = el('div', `audit-strip ${broken ? 'broken' : 'valid'}`);
   strip.appendChild(el('span', `dot ${broken ? 'red' : 'green'}`));
   strip.appendChild(el('span', null, broken
-    ? `HASH CHAIN BROKEN — ${result.stages.find((s) => s.result === 'DENY')?.detail ?? ''}`
+    ? `HASH CHAIN BROKEN — ${result.stages?.find((s) => s.result === 'DENY')?.detail ?? 'an entry was altered'}`
     : `HASH CHAIN VALID · ${result?.audit?.entries ?? 0} entr${(result?.audit?.entries ?? 0) === 1 ? 'y' : 'ies'} · head ${result?.audit?.head_hash?.slice(0, 16) ?? '—'}`));
   container.appendChild(strip);
 
-  // One row per entry: what was decided, and the hash that seals it.
+  const head = el('div', 'audit-row head');
+  for (const [cls, label] of [['ln', '#'], ['when', 'Timestamp · UTC'], ['res', 'Decision'],
+    ['detail', 'Action'], ['who', 'Agent'], ['rel', 'Relationship'],
+    ['hash', 'Links to'], ['hash', 'Hash']]) {
+    head.appendChild(el('span', cls, label));
+  }
+  container.appendChild(head);
+
+  // One row per entry: who, what was decided, and the hash that seals it.
+  //
+  // The Agent and Parent columns are here because the separate roster panel was
+  // removed. That panel rendered from the last validation and then sat there, so
+  // editing a scope left it reporting the old value — a view that disagrees with
+  // the document it claims to show. Identity belongs on the record that is
+  // actually tamper-evident, not on a second table that can drift from it.
+  // Full identities, not truncated. There is room for them here, and an audit
+  // log whose whole purpose is attribution should not make you hover to find out
+  // who did something. CSS ellipsis handles narrow viewports.
+  const idCell = (value, full) => {
+    const span = el('span', 'who mono', value ?? '');
+    if (full) span.title = full;
+    return span;
+  };
+
+  // Where each agent sits in the chain, read from the document rather than from
+  // the event. An event knows it spawned a child; it does not know whether the
+  // agent it names is itself somebody's child, and that is the question the
+  // column answers. An id the document no longer contains reports nothing rather
+  // than guessing.
+  const relationship = new Map();
+  for (const node of result?.chain ?? []) {
+    if (node.role !== 'agent') continue;
+    const id = node.metadata?.agent_id;
+    if (id) relationship.set(id, node.metadata?.parent_agent_id ? 'child' : 'parent');
+  }
+
+  // Full date and time, UTC. An audit record is read later, often much later,
+  // and a bare wall-clock time is ambiguous the moment the log outlives the
+  // session that produced it. The seeded entries are also backdated relative to
+  // each other, which only reads correctly with a date attached.
+  const clock = (iso) => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 19).replace('T', ' ');
+  };
+
   const list = el('div', 'audit-list');
   for (const b of result?.audit?.chain ?? []) {
     const row = el('div', 'audit-row');
     row.appendChild(el('span', 'ln', String(b.index)));
+    row.appendChild(el('span', 'when mono', clock(b.timestamp)));
     row.appendChild(el('span', `res ${b.event?.decision === 'DENIED' ? 'bad' : 'ok'}`,
       b.event?.decision ?? '—'));
     // Always say WHAT was attempted, then why it was refused. This used to
@@ -431,9 +524,38 @@ function renderAudit(result, container) {
     const detail = el('span', 'detail', b.event?.action ?? '—');
     if (b.event?.reason) {
       detail.appendChild(el('span', 'why', ` · ${b.event.reason}`));
+    } else if (b.event?.detail) {
+      // The seeded events carry a description of what happened and it was never
+      // rendered. On an ALLOWED row there is no reason to show, so this is the
+      // column's natural content rather than empty space.
+      detail.appendChild(el('span', 'note', ` · ${b.event.detail}`));
     }
     row.appendChild(detail);
-    row.appendChild(el('span', 'hash', `${String(b.hash).slice(0, 12)}…`));
+
+    // A run-level entry names every agent it covered rather than a single one,
+    // so it reports the count with the full list on hover instead of silently
+    // showing the first.
+    const agents = Array.isArray(b.event?.agents) ? b.event.agents : null;
+    row.appendChild(agents
+      ? idCell(`${agents.length} agents`, agents.join('\n'))
+      : idCell(b.event?.agent, b.event?.agent));
+
+    // A run-level entry covers the whole chain, so it has no single role.
+    const rel = agents ? 'whole chain' : (relationship.get(b.event?.agent) ?? '');
+    const relCell = el('span', `rel ${rel === 'child' ? 'is-child' : rel === 'parent' ? 'is-parent' : ''}`, rel);
+    if (rel === 'child' && b.event?.parent) relCell.title = `parent: ${b.event.parent}`;
+    row.appendChild(relCell);
+
+    // The link back. A panel that asserts HASH CHAIN VALID while hiding the
+    // links is asking to be taken on trust — the whole point of the structure is
+    // that entry N carries entry N-1's hash, and you should be able to read that
+    // off the table rather than believe it.
+    const prev = String(b.previous_hash ?? '');
+    row.appendChild(el('span', 'hash prev',
+      prev === 'genesis' ? 'genesis' : `${prev.slice(0, 16)}…`));
+    const hashCell = el('span', 'hash', `${String(b.hash).slice(0, 16)}…`);
+    hashCell.title = String(b.hash);
+    row.appendChild(hashCell);
     list.appendChild(row);
   }
   container.appendChild(list);
@@ -444,7 +566,7 @@ function renderAudit(result, container) {
  * are all things you consult AFTER a result, never things you act on — so they
  * sit behind tabs instead of competing with the panes you actually use.
  */
-let refTab = 'roster';
+let refTab = 'audit';
 
 function renderReference(result) {
   referenceView = result;
@@ -455,7 +577,6 @@ function renderReference(result) {
   const broken = result?.error_code === 'ERR_AUDIT_CHAIN_BROKEN';
   const entries = result?.audit?.entries ?? 0;
   const defs = [
-    { id: 'roster', label: 'Agents', badge: `${(result?.chain ?? []).length} nodes`, cls: '' },
     { id: 'audit', label: 'Audit chain',
       badge: broken ? 'BROKEN' : `${entries} entr${entries === 1 ? 'y' : 'ies'}`,
       cls: broken ? 'bad' : 'ok' },
@@ -470,8 +591,7 @@ function renderReference(result) {
     tabs.appendChild(t);
   }
 
-  if (refTab === 'roster') renderRoster(result, body);
-  else if (refTab === 'audit') renderAudit(result, body);
+  if (refTab === 'audit') renderAudit(result, body);
   else renderCerts(body);
 }
 
@@ -575,15 +695,14 @@ async function verify() {
     } catch { /* unparseable document: nothing to write back into */ }
   }
 
-  renderPipeline(result);
   renderVerdict(result);
   renderLog(result);
-  renderReference(result);
+  publish({ result });
 
   // Mark the offending line AND bring it on screen, without stealing focus.
   const line = result.verdict === 'DENY'
     ? locateFailure(docBox.value, failureLocation(result)) : null;
-  renderGutter(line);
+  publish({ badLine: line, result });
   if (line) scrollLineIntoView(line);
   return result;
 }
@@ -850,11 +969,11 @@ function renderIdle(message, doc) {
   inner.replaceChildren();
   inner.appendChild(el('div', 'banner-main', 'NOT VALIDATED'));
   inner.appendChild(el('div', 'banner-sub', message));
-  renderPipeline(null);
   $('log').replaceChildren();
-  // Show the seeded chain in the roster even though nothing has been claimed
-  // about it yet — the agents exist, they just have not been checked.
-  renderReference(doc ? { chain: doc.chain, crl: doc.crl, audit: { entries: 0, chain: [] } } : null);
+  // The agents exist, they just have not been checked yet. Published like
+  // everything else so the audit badge reflects the real chain rather than a
+  // hardcoded zero.
+  publish({ result: null });
 }
 
 /**
@@ -985,5 +1104,5 @@ $('back-link').addEventListener('click', (e) => {
 
 buildControls();
 renderFooter();
-renderPipeline(null);
+publish({ result: null });
 loadDefaults();
