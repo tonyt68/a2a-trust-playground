@@ -144,6 +144,18 @@ function scrollLineIntoView(lineNumber, { always = false } = {}) {
  * the decision log, which is where someone goes once they want it.
  */
 /**
+ * What a step says when it denies.
+ *
+ * Every step but one answers "was this permitted?", so REFUSED is right there:
+ * a delegation was refused, a policy was refused. AUDIT CHAIN asks a different
+ * question — "is the record intact?" — and nobody requested that the log be
+ * broken, it simply is. Answering a question about STATE with a verdict about a
+ * REQUEST reads as though detection had failed rather than succeeded, which is
+ * the opposite of what a red audit step means.
+ */
+const DENY_WORD = { 'AUDIT CHAIN': 'BROKEN' };
+
+/**
  * The flow walks the CHAIN, not the check list.
  *
  * "Break the child certificate and see what happens" is the thing people
@@ -180,7 +192,7 @@ function renderPipeline(result) {
     box.appendChild(el('div', 'p-name', subject));
     box.appendChild(el('div', 'p-ask', WALK_ASKS[subject]));
     box.appendChild(el('div', 'p-sub',
-      w?.result === 'PASS' ? 'VALID' : w?.result === 'DENY' ? 'REFUSED'
+      w?.result === 'PASS' ? 'VALID' : w?.result === 'DENY' ? (DENY_WORD[subject] ?? 'REFUSED')
         : result ? 'not reached' : '—'));
     if (w?.detail) box.title = w.detail;
     row.appendChild(box);

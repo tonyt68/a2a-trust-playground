@@ -152,7 +152,7 @@ guarantee had to move into an extension validators actually implement.
 pnpm install
 pnpm dev      # http://127.0.0.1:5173 — hot bundle, no build step
 pnpm test     # 472 unit tests
-pnpm e2e      # 148 assertions against the built file, offline
+pnpm e2e      # 150 assertions against the built file, offline
 pnpm build    # dist/a2a.html — one self-contained file
 ```
 
@@ -199,7 +199,7 @@ the saved file in a clean profile does.
 
 ## Testing
 
-472 unit tests and 148 end-to-end assertions. The two that matter most are **differential**:
+472 unit tests and 150 end-to-end assertions. The two that matter most are **differential**:
 
 - **Conformance to RFC 8785, not to another codebase.** The canonicalization
   oracle is the RFC, with Python used as an independent second implementation

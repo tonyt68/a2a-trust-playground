@@ -142,8 +142,12 @@ for (const [label, expected] of Object.entries(EXPECTED)) {
   ok(`  ${label} → marks the offending line`, marked || isAudit);
   const denies = await page.evaluate(() => document.querySelectorAll('#log .log-row.deny').length);
   ok(`  ${label} → exactly one DENY row`, denies === 1, `${denies} rows`);
-  const refused = (await flow()).filter((f) => f.endsWith('=REFUSED')).length;
-  ok(`  ${label} → the walk stops at one step`, refused === 1, `${refused} refused`);
+  // Counted by state class, not by the word. A denied step says REFUSED for a
+  // request and BROKEN for the audit chain, and the count is about how many
+  // steps failed, not about how they are phrased.
+  const failedSteps = await page.evaluate(() =>
+    document.querySelectorAll('#pipeline .p-box.err').length);
+  ok(`  ${label} → the walk stops at one step`, failedSteps === 1, `${failedSteps} failed`);
 }
 
 // ── Freeform edits in the editor (AC-14) ──────────────────────────────────
@@ -345,6 +349,16 @@ await click('Alter an audit entry');
 await click('Validate');
 ok('audit is broken with an unrelated edit in place', (await verdict()) === 'DENIED');
 
+// A step must answer the question it asks. "is the record intact?" is a
+// question about state, so REFUSED there reads as though detection failed.
+const stepWord = (name) => page.evaluate((n) => {
+  const box = [...document.querySelectorAll('#pipeline .p-box')]
+    .find((b) => b.querySelector('.p-name')?.textContent === n);
+  return box?.querySelector('.p-sub')?.textContent;
+}, name);
+ok('a tampered audit chain reads BROKEN, not REFUSED',
+  (await stepWord('AUDIT CHAIN')) === 'BROKEN', await stepWord('AUDIT CHAIN'));
+
 await click('Reset the audit chain');
 await click('Validate');
 ok('Reset the audit chain repairs it', (await verdict()) === 'ALL STAGES PASSED', await code());
@@ -436,6 +450,15 @@ await click('Validate');
 ok('re-validating leaves an already-visible failure alone',
   (await lineState()).scrollTop === nudged, `settled ${settled}, nudged ${nudged}`);
 
+await click('Reset Certs');
+
+await click('Reset Certs');
+await click('Escalate the scope');
+await click('Validate');
+ok('a genuine refusal still reads REFUSED',
+  (await page.evaluate(() => [...document.querySelectorAll('#pipeline .p-box')]
+    .find((b) => b.querySelector('.p-name')?.textContent === 'DELEGATION')
+    ?.querySelector('.p-sub')?.textContent)) === 'REFUSED');
 await click('Reset Certs');
 
 // ── Browser-side security properties ──────────────────────────────────────
