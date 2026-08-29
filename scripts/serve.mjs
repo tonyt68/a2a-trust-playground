@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
 
 const root = new URL('..', import.meta.url).pathname;
-const port = Number(process.argv[2] ?? 5173);
+const port = Number(process.argv[2] ?? 9100);
 
 const bundle = async () => (await build({
   entryPoints: [root + 'src/app.js'], bundle: true, format: 'esm',

@@ -150,7 +150,7 @@ guarantee had to move into an extension validators actually implement.
 
 ```bash
 pnpm install
-pnpm dev      # http://127.0.0.1:5173 — hot bundle, no build step
+pnpm dev      # http://127.0.0.1:9100 — hot bundle, no build step
 pnpm test     # 472 unit tests
 pnpm e2e      # 162 assertions against the built file, offline
 pnpm build    # dist/a2a.html — one self-contained file
