@@ -43,6 +43,7 @@ import { mintChain, newAgentId } from './mint.js';
 import { extractIdentityFields, extractPolicyFields, canonicalize } from './canonical.js';
 import { signCanonical } from './crypto-sign.js';
 import { policyContentHash } from './policy.js';
+import { AuditChain } from './audit-chain.js';
 
 /** Scopes used by the default chain. Deliberately two, so a subset is meaningful. */
 export const PARENT_SCOPES = Object.freeze(['read:events', 'write:events']);
@@ -123,6 +124,30 @@ export async function buildDefaultDocument({ now = new Date(), onProgress } = {}
   const ownerKey = minted.authorities.owner.privateKey;
   const paKey = minted.authorities.pa.privateKey;
 
+  // ── A real audit chain, so stage 9 does real work on first load ──────────
+  //
+  // Same reasoning as the seeded policy update above. An empty chain makes §16.6
+  // pass vacuously: there is nothing to verify, so "HASH CHAIN VALID" says
+  // nothing, and `Alter an audit entry` has no entry to alter. That button
+  // silently did nothing on a fresh load, which reads as a broken control rather
+  // than as a demonstration.
+  //
+  // These are genuinely hash-linked by AuditChain.append, so tampering with any
+  // one of them breaks verification the same way a real chain would.
+  const audit = new AuditChain();
+  await audit.append({
+    action: 'issue_template', decision: 'ALLOWED',
+    agent: parentId, detail: 'parent template issued by the registry CA',
+  }, new Date(now.getTime() - 120_000));
+  await audit.append({
+    action: 'spawn_child', decision: 'ALLOWED',
+    agent: childId, parent: parentId, detail: 'two-check spawn rule satisfied',
+  }, new Date(now.getTime() - 60_000));
+  await audit.append({
+    action: 'policy_update', decision: 'ALLOWED',
+    agent: childId, detail: 'dual-signed policy update accepted, version 2',
+  }, new Date(now.getTime() - 30_000));
+
   return {
     // ── The chain, walked by stages 1, 2, 3, 7 and 8 ────────────────────────
     chain: [
@@ -179,6 +204,6 @@ export async function buildDefaultDocument({ now = new Date(), onProgress } = {}
     pa_sig: await signCanonical(canonicalize(extractPolicyFields(policyDoc)), paKey),
 
     crl: { revoked: [], disabled: [] },
-    audit: { chain: [] },
+    audit: audit.toJSON(),
   };
 }

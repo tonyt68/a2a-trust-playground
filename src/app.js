@@ -306,6 +306,15 @@ function failureLocation(result) {
     ERR_CHILD_NOT_WHITELISTED: 'chain[1].metadata.can_spawn',
     ERR_SCOPE_ESCALATION: 'chain[2].metadata.allowed_scopes',
     ERR_AUDIT_CHAIN_BROKEN: 'audit',
+    // §6 certificate checks. Without these a refusal marks nothing at all,
+    // which is how the basicConstraints and digest checks shipped: they deny
+    // correctly and pointed at no line.
+    ERR_MALFORMED_PEM: 'chain[2].cert_pem',
+    ERR_KEY_TOO_SMALL: 'chain[2].cert_pem',
+    ERR_BASIC_CONSTRAINTS: 'chain[2].cert_pem',
+    ERR_WEAK_SIGNATURE: 'chain[2].cert_pem',
+    ERR_AGENT_ID_FORMAT: 'chain[2].metadata.agent_id',
+    ERR_TIMESTAMP_FORMAT: 'chain[2].metadata.expires_at',
     ERR_CHAIN_INVALID: 'chain[2].cert_pem',
     ERR_FORGED_ISSUER: 'chain[2].cert_pem',
     ERR_SELF_SIGNED: 'chain[2].cert_pem',
@@ -317,7 +326,23 @@ function failureLocation(result) {
     ERR_BOUNDS_UNPARSEABLE: 'chain[2].metadata.authorization_bounds',
     ERR_EMPTY_SCOPES: 'chain[2].requested_scopes',
   };
-  return { path: paths[code] ?? null, values: quoted };
+  let path = paths[code] ?? null;
+
+  // The audit failure knows WHICH entry broke, so point at that entry rather
+  // than at the `audit` container. "entry 0 content was altered" with a marker
+  // on the enclosing object is technically correct and useless on a long chain:
+  // the visitor still has to find the entry themselves.
+  if (code === 'ERR_AUDIT_CHAIN_BROKEN') {
+    const idx = /entry (\d+)/.exec(detail);
+    if (idx) path = `audit.chain[${idx[1]}]`;
+  }
+
+  // Codes with no path are deliberate, not oversights: ERR_MALFORMED_JSON,
+  // ERR_DOCUMENT_TOO_LARGE and ERR_INTERNAL are properties of the document as a
+  // whole, and ERR_SCHEMA_VIOLATION / ERR_FIELD_CHARSET / ERR_FIELD_RANGE can
+  // fire on any of a dozen fields. Guessing one would point confidently at the
+  // wrong line, which is worse than pointing at none.
+  return { path, values: quoted };
 }
 
 function renderRoster(result, container) {
@@ -711,10 +736,16 @@ const SABOTAGE = [
       d.policy_doc.owner = 'attacker@example.com'; return 'policy_doc.owner'; } },
   { phase: 'AUDIT', label: 'Alter an audit entry', section: '16.6', apply: (d) => {
       if (!d.audit?.chain?.length) return null;
-      // Flip it to whatever it is NOT. Setting it to a value it already holds
-      // would leave the chain intact and the button would silently do nothing.
+      // Idempotent on purpose. This used to FLIP `decision` to whatever it was
+      // not, which made a second press restore the original content, recompute
+      // to the same hash, and repair the chain — a red button that fixed things
+      // when pressed twice, unlike every other sabotage here.
+      //
+      // Writing a fixed value instead means pressing it again leaves the chain
+      // exactly as broken as it already was. `Reset Certs` is the way back, the
+      // same as for every other red button.
       const entry = d.audit.chain[0];
-      entry.event.decision = entry.event.decision === 'DENIED' ? 'ALLOWED' : 'DENIED';
+      entry.event.detail = 'record altered after the block was sealed';
       return 'audit'; } },
 ];
 

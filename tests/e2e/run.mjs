@@ -85,14 +85,18 @@ ok('roster shows the seeded agents before any validation',
 
 // ── Validate ──────────────────────────────────────────────────────────────
 section('validate');
+const auditBefore = await page.evaluate(() =>
+  (JSON.parse(document.getElementById('doc').value).audit?.chain ?? []).length);
 await click('Validate');
 ok('a fresh chain validates', await verdict() === 'ALL STAGES PASSED', await code());
 ok('all six walk steps are VALID', (await flow()).every((f) => f.endsWith('=VALID')), (await flow()).join(' '));
 ok('nine stages logged, none skipped',
   await page.evaluate(() => [...document.querySelectorAll('#log .log-row')]
     .filter((r) => r.children[2].textContent === 'PASS').length) === 9);
-ok('audit chain gains an entry',
-  await page.evaluate(() => /1 entr/.test(document.querySelector('.ref-tab:nth-child(2)').textContent)));
+ok('a validation run appends exactly one audit entry',
+  (await page.evaluate(() =>
+    (JSON.parse(document.getElementById('doc').value).audit?.chain ?? []).length)) === auditBefore + 1,
+  `before ${auditBefore}`);
 
 // ── Modifications the draft ALLOWS ────────────────────────────────────────
 section('modifications the draft allows — must stay valid');
@@ -272,6 +276,59 @@ for (const width of [1600, 1280, 1024, 820, 640]) {
 }
 await page.setViewportSize({ width: 1500, height: 1000 });
 ok('page stays a sane height', await page.evaluate(() => document.documentElement.scrollHeight) < 3200);
+
+// ── The audit chain (§16.6) ───────────────────────────────────────────────
+//
+// The default document used to seed `audit: { chain: [] }`, so stage 9 passed
+// vacuously and `Alter an audit entry` had no entry to alter. The button
+// silently did nothing on a fresh load, which reads as a broken control rather
+// than a demonstration.
+section('audit chain');
+
+await click('Reset Certs');
+const seeded = await page.evaluate(() =>
+  (JSON.parse(document.getElementById('doc').value).audit?.chain ?? []).length);
+ok('a fresh document seeds a real audit chain', seeded >= 3, `${seeded} entries`);
+
+await click('Validate');
+ok('the seeded chain verifies', (await verdict()) === 'ALL STAGES PASSED');
+
+await click('Alter an audit entry');
+await click('Validate');
+ok('altering an entry breaks the chain', (await verdict()) === 'DENIED', await code());
+ok('the refusal names the entry',
+  (await page.evaluate(() => document.querySelector('.banner-sub')?.textContent)) 
+    ?.toUpperCase().includes('ENTRY 0'));
+
+// The marker must land on the entry, not on the enclosing `audit` object.
+const auditMark = await page.evaluate(() => {
+  const box = document.getElementById('doc');
+  const bad = document.querySelector('#gutter .g-line.bad');
+  if (!bad) return null;
+  const n = [...document.querySelectorAll('#gutter .g-line')].indexOf(bad) + 1;
+  const lh = parseFloat(getComputedStyle(box).lineHeight) || 17;
+  return {
+    n,
+    within: box.value.split('\n').slice(n - 1, n + 4).join(' '),
+    from: Math.floor(box.scrollTop / lh) + 1,
+    to: Math.floor((box.scrollTop + box.clientHeight) / lh) + 1,
+  };
+});
+ok('the audit failure marks a line at all', auditMark !== null);
+ok('it marks the altered ENTRY, not the audit container',
+  auditMark?.within.includes('"index": 0'), auditMark?.within.slice(0, 60));
+ok('the marked audit line is on screen',
+  auditMark && auditMark.n >= auditMark.from && auditMark.n <= auditMark.to);
+
+// Idempotent: this used to FLIP `decision`, so a second press repaired the
+// chain. A red button must not fix things when pressed twice.
+await click('Alter an audit entry');
+await click('Validate');
+ok('pressing the sabotage twice leaves it broken', (await verdict()) === 'DENIED', await code());
+
+await click('Reset Certs');
+await click('Validate');
+ok('Reset Certs restores a verifying chain', (await verdict()) === 'ALL STAGES PASSED');
 
 // ── The refusal has to be visible ─────────────────────────────────────────
 //
