@@ -411,7 +411,16 @@ function renderAudit(result, container) {
     row.appendChild(el('span', 'ln', String(b.index)));
     row.appendChild(el('span', `res ${b.event?.decision === 'DENIED' ? 'bad' : 'ok'}`,
       b.event?.decision ?? '—'));
-    row.appendChild(el('span', 'detail', b.event?.reason ?? b.event?.action ?? ''));
+    // Always say WHAT was attempted, then why it was refused. This used to
+    // render `reason ?? action`, so a denied row showed only the error code and
+    // the action vanished — "DENIED  ERR_AUDIT_CHAIN_BROKEN" reads as though the
+    // error code is the thing that was denied. Every other row names an action,
+    // so the one row that did not was the confusing one.
+    const detail = el('span', 'detail', b.event?.action ?? '—');
+    if (b.event?.reason) {
+      detail.appendChild(el('span', 'why', ` · ${b.event.reason}`));
+    }
+    row.appendChild(detail);
     row.appendChild(el('span', 'hash', `${String(b.hash).slice(0, 12)}…`));
     list.appendChild(row);
   }

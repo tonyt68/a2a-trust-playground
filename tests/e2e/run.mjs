@@ -354,6 +354,31 @@ ok('and it KEEPS the unrelated edit', (await parentScopes()) === narrowed,
 await click('Reset Certs');
 ok('whereas Reset Certs discards that edit', (await parentScopes()) !== narrowed);
 
+// Every audit row must name WHAT was attempted. The denied row used to render
+// `reason ?? action`, so it showed only the error code and the action vanished:
+// "DENIED  ERR_AUDIT_CHAIN_BROKEN" reads as though the code is the thing that
+// was denied, while every row above it named an action.
+await click('Alter an audit entry');
+await click('Validate');
+await page.evaluate(() => {
+  [...document.querySelectorAll('.ref-tab')].find((t) => /audit/i.test(t.textContent))?.click();
+});
+const auditRows = await page.evaluate(() => [...document.querySelectorAll('.audit-row')]
+  .map((r) => ({
+    decision: r.children[1]?.textContent.trim(),
+    detail: r.children[2]?.textContent.trim(),
+  })));
+ok('the audit panel lists rows', auditRows.length >= 4, `${auditRows.length} rows`);
+ok('no audit row leads with an error code',
+  auditRows.every((r) => !r.detail.startsWith('ERR_')),
+  auditRows.map((r) => r.detail).join(' | '));
+ok('denied rows name the action AND the reason',
+  auditRows.filter((r) => r.decision === 'DENIED')
+    .every((r) => r.detail.includes('verify_chain') && r.detail.includes('ERR_')),
+  auditRows.filter((r) => r.decision === 'DENIED').map((r) => r.detail).join(' | '));
+
+await click('Reset the audit chain');
+
 // ── The refusal has to be visible ─────────────────────────────────────────
 //
 // A gutter marker the visitor cannot see is worse than no marker: the banner
