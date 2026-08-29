@@ -20,7 +20,7 @@
  * sees WHAT changed rather than watching a verdict flip for invisible reasons.
  */
 
-import { buildDefaultDocument } from './defaults.js';
+import { buildDefaultDocument, seedAuditChain } from './defaults.js';
 import { mintChain } from './mint.js';
 import { policyContentHash } from './policy.js';
 import { extractPolicyFields, extractIdentityFields, canonicalize } from './canonical.js';
@@ -588,6 +588,24 @@ const parentOf = (d) => agents(d).find((n) => !n.metadata?.parent_agent_id) ?? a
  * policy one scope wider does not. The boundary is the lesson, not the wall.
  */
 const ALLOWED = [
+  { phase: 'AUDIT', label: 'Reset the audit chain', section: '16.6', apply: async (d) => {
+      // A repair, not a modification. `Reset Certs` also fixes a broken chain,
+      // but it throws away every other edit with it — so if you have narrowed a
+      // scope, re-signed a policy and THEN broken the audit log, the only way
+      // back was to lose all of it and start over.
+      //
+      // Rebuilds from the same seedAuditChain the default uses, rather than a
+      // second copy of that logic, so a chain rebuilt here verifies exactly as
+      // the seeded one does.
+      const agents = (d.chain ?? []).filter((n) => n.role === 'agent');
+      const child = agents.find((n) => n.metadata?.parent_agent_id);
+      const parent = agents.find((n) => !n.metadata?.parent_agent_id);
+      const chain = await seedAuditChain({
+        parentId: parent?.metadata?.agent_id,
+        childId: child?.metadata?.agent_id,
+      });
+      d.audit = chain.toJSON();
+      return 'audit'; } },
   { phase: 'BOUNDS', label: 'Narrow the parent to read-only', section: '8.3', apply: (d) => {
       // Drop write:events from the PARENT. The child holds read:events, so the
       // delegation is still a subset and the chain still validates. Narrowing is

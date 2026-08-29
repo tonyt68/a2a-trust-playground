@@ -177,3 +177,82 @@ describe('loading a pasted chain', () => {
     });
   }
 });
+
+/**
+ * The seeded chain (§16.6).
+ *
+ * `seedAuditChain` exists as a shared function rather than inline code because
+ * two things build a chain: the default document, and the `Reset the audit
+ * chain` button. Two copies would drift, and the drift would surface as a §16.6
+ * failure with no obvious cause -- a chain that was fine when seeded and broken
+ * after a reset, or the reverse.
+ *
+ * These tests pin the property that made extracting it worthwhile: a rebuilt
+ * chain is indistinguishable from a seeded one.
+ */
+describe('the seeded audit chain', () => {
+  const IDS = {
+    parentId: '8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa',
+    childId: 'c669186f-a84b-4d7a-81f3-05880df87114',
+  };
+  const AT = new Date(Date.UTC(2026, 7, 28, 12, 0, 0));
+
+  it('seeds enough entries for stage 9 to do real work', async () => {
+    // The default previously seeded an EMPTY chain, so §16.6 passed vacuously
+    // and the tamper button had nothing to tamper with.
+    const { seedAuditChain } = await import('../src/defaults.js');
+    const chain = await seedAuditChain({ ...IDS, now: AT });
+    expect(chain.toJSON().chain.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('verifies as sealed', async () => {
+    const { seedAuditChain } = await import('../src/defaults.js');
+    const chain = await seedAuditChain({ ...IDS, now: AT });
+    expect((await chain.verify()).valid).toBe(true);
+  });
+
+  it('links every entry to the one before it', async () => {
+    const { seedAuditChain } = await import('../src/defaults.js');
+    const { chain } = (await seedAuditChain({ ...IDS, now: AT })).toJSON();
+    expect(chain[0].previous_hash).toBe(GENESIS_PREVIOUS_HASH);
+    for (let i = 1; i < chain.length; i++) {
+      expect(chain[i].previous_hash).toBe(chain[i - 1].hash);
+      expect(chain[i].index).toBe(i);
+    }
+  });
+
+  it('is reproducible: a rebuild matches a seed byte for byte', async () => {
+    // The whole reason the function is shared. If this ever fails, the reset
+    // button and the default have diverged.
+    const { seedAuditChain } = await import('../src/defaults.js');
+    const a = (await seedAuditChain({ ...IDS, now: AT })).toJSON();
+    const b = (await seedAuditChain({ ...IDS, now: AT })).toJSON();
+    expect(JSON.stringify(b)).toBe(JSON.stringify(a));
+  });
+
+  it('names the agents it describes', async () => {
+    const { seedAuditChain } = await import('../src/defaults.js');
+    const { chain } = (await seedAuditChain({ ...IDS, now: AT })).toJSON();
+    const agents = chain.map((b) => b.event.agent);
+    expect(agents).toContain(IDS.parentId);
+    expect(agents).toContain(IDS.childId);
+  });
+
+  it('breaks when any single entry is altered', async () => {
+    const { seedAuditChain } = await import('../src/defaults.js');
+    for (let i = 0; i < 3; i++) {
+      const { chain } = (await seedAuditChain({ ...IDS, now: AT })).toJSON();
+      chain[i].event.detail = 'record altered after the block was sealed';
+      const r = await new AuditChain(chain).verify();
+      expect(r.valid, `entry ${i}`).toBe(false);
+      expect(r.brokenAt, `entry ${i}`).toBe(i);
+    }
+  });
+
+  it('the document the page loads carries a chain that verifies', async () => {
+    const { buildDefaultDocument } = await import('../src/defaults.js');
+    const doc = await buildDefaultDocument();
+    expect(doc.audit.chain.length).toBeGreaterThanOrEqual(3);
+    expect((await AuditChain.fromJSON(doc.audit).verify()).valid).toBe(true);
+  }, 60_000);
+});

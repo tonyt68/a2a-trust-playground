@@ -85,6 +85,36 @@ function agentMetadata({ agentId, scopes, canSpawn, maxChildren, parent, now, tt
 }
 
 /**
+ * A real, hash-linked audit chain for the seeded document.
+ *
+ * Exported because the `Reset the audit chain` button rebuilds it too, and two
+ * copies of this would drift: the seeded chain would verify and the rebuilt one
+ * would not, or vice versa, and the difference would only show up as a §16.6
+ * failure with no obvious cause.
+ *
+ * The default previously seeded an EMPTY chain. Stage 9 then passed vacuously,
+ * and `Alter an audit entry` had no entry to alter, so it silently did nothing.
+ * Same reasoning as the seeded policy update: a stage with nothing to work on is
+ * a mechanism the visitor never sees.
+ */
+export async function seedAuditChain({ parentId, childId, now = new Date() }) {
+  const audit = new AuditChain();
+  await audit.append({
+    action: 'issue_template', decision: 'ALLOWED',
+    agent: parentId, detail: 'parent template issued by the registry CA',
+  }, new Date(now.getTime() - 120_000));
+  await audit.append({
+    action: 'spawn_child', decision: 'ALLOWED',
+    agent: childId, parent: parentId, detail: 'two-check spawn rule satisfied',
+  }, new Date(now.getTime() - 60_000));
+  await audit.append({
+    action: 'policy_update', decision: 'ALLOWED',
+    agent: childId, detail: 'dual-signed policy update accepted, version 2',
+  }, new Date(now.getTime() - 30_000));
+  return audit;
+}
+
+/**
  * Build the seed document: CA, Owner Authority, Policy Authority, Agent A,
  * Agent B, and a dual-signed policy update narrowing B within its ceiling.
  *
@@ -124,29 +154,7 @@ export async function buildDefaultDocument({ now = new Date(), onProgress } = {}
   const ownerKey = minted.authorities.owner.privateKey;
   const paKey = minted.authorities.pa.privateKey;
 
-  // ── A real audit chain, so stage 9 does real work on first load ──────────
-  //
-  // Same reasoning as the seeded policy update above. An empty chain makes §16.6
-  // pass vacuously: there is nothing to verify, so "HASH CHAIN VALID" says
-  // nothing, and `Alter an audit entry` has no entry to alter. That button
-  // silently did nothing on a fresh load, which reads as a broken control rather
-  // than as a demonstration.
-  //
-  // These are genuinely hash-linked by AuditChain.append, so tampering with any
-  // one of them breaks verification the same way a real chain would.
-  const audit = new AuditChain();
-  await audit.append({
-    action: 'issue_template', decision: 'ALLOWED',
-    agent: parentId, detail: 'parent template issued by the registry CA',
-  }, new Date(now.getTime() - 120_000));
-  await audit.append({
-    action: 'spawn_child', decision: 'ALLOWED',
-    agent: childId, parent: parentId, detail: 'two-check spawn rule satisfied',
-  }, new Date(now.getTime() - 60_000));
-  await audit.append({
-    action: 'policy_update', decision: 'ALLOWED',
-    agent: childId, detail: 'dual-signed policy update accepted, version 2',
-  }, new Date(now.getTime() - 30_000));
+  const audit = await seedAuditChain({ parentId, childId, now });
 
   return {
     // ── The chain, walked by stages 1, 2, 3, 7 and 8 ────────────────────────

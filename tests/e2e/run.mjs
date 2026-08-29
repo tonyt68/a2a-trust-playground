@@ -330,6 +330,30 @@ await click('Reset Certs');
 await click('Validate');
 ok('Reset Certs restores a verifying chain', (await verdict()) === 'ALL STAGES PASSED');
 
+// `Reset the audit chain` is a repair sitting next to the button that breaks it.
+// Reset Certs also fixes a broken chain, but it is at the top of the page and it
+// discards every other edit with it.
+const parentScopes = () => page.evaluate(() => {
+  const d = JSON.parse(document.getElementById('doc').value);
+  return d.chain.find((n) => n.role === 'agent' && !n.metadata.parent_agent_id)
+    .metadata.allowed_scopes.join(',');
+});
+
+await click('Narrow the parent to read-only');
+const narrowed = await parentScopes();
+await click('Alter an audit entry');
+await click('Validate');
+ok('audit is broken with an unrelated edit in place', (await verdict()) === 'DENIED');
+
+await click('Reset the audit chain');
+await click('Validate');
+ok('Reset the audit chain repairs it', (await verdict()) === 'ALL STAGES PASSED', await code());
+ok('and it KEEPS the unrelated edit', (await parentScopes()) === narrowed,
+  `expected ${narrowed}, got ${await parentScopes()}`);
+
+await click('Reset Certs');
+ok('whereas Reset Certs discards that edit', (await parentScopes()) !== narrowed);
+
 // ── The refusal has to be visible ─────────────────────────────────────────
 //
 // A gutter marker the visitor cannot see is worse than no marker: the banner
