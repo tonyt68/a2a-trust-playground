@@ -420,6 +420,40 @@ const stepWord = (name) => page.evaluate((n) => {
 ok('a tampered audit chain reads BROKEN, not REFUSED',
   (await stepWord('AUDIT CHAIN')) === 'BROKEN', await stepWord('AUDIT CHAIN'));
 
+// The table is ~1130px of fixed columns. It must scroll inside its own container
+// rather than either being clipped or making the page scroll sideways. It was
+// clipped: on a 390px viewport the Agent, Relationship, Links to and Hash
+// columns were unreachable, with nothing on screen to say they existed.
+for (const [w, h, label] of [[390, 844, 'phone'], [768, 1024, 'tablet']]) {
+  await page.setViewportSize({ width: w, height: h });
+  await page.waitForTimeout(200);
+  const r = await page.evaluate(() => {
+    const sc = document.querySelector('.audit-scroll');
+    if (!sc) return null;
+    sc.scrollLeft = 99999;
+    const last = document.querySelector('.audit-row:not(.head)')?.lastElementChild;
+    return {
+      scrolls: sc.scrollWidth > sc.clientWidth,
+      pageSideways: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+      lastReachable: last ? last.getBoundingClientRect().right <= window.innerWidth + 2 : false,
+    };
+  });
+  ok(`${label}: the audit log scrolls rather than clipping`, r?.scrolls === true);
+  ok(`${label}: the page itself never scrolls sideways`, r?.pageSideways === false);
+  ok(`${label}: the Hash column can be reached`, r?.lastReachable === true);
+}
+await page.setViewportSize({ width: 1500, height: 1000 });
+await page.waitForTimeout(200);
+
+// Header and rows share one scroller; two would desync and the labels would
+// drift off their columns as soon as you scrolled.
+ok('every heading sits over its own column', await page.evaluate(() => {
+  const head = [...document.querySelectorAll('.audit-row.head span')];
+  const row = [...(document.querySelector('.audit-row:not(.head)')?.children ?? [])];
+  return head.length === row.length && head.every((h, i) =>
+    Math.round(h.getBoundingClientRect().left) === Math.round(row[i].getBoundingClientRect().left));
+}));
+
 await click('Reset the audit chain');
 await click('Validate');
 ok('Reset the audit chain repairs it', (await verdict()) === 'ALL STAGES PASSED', await code());

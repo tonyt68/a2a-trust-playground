@@ -470,7 +470,18 @@ function renderAudit(result, container) {
     ['hash', 'Links to'], ['hash', 'Hash']]) {
     head.appendChild(el('span', cls, label));
   }
-  container.appendChild(head);
+
+  // The table is ~1130px of fixed columns. On a phone that is three times the
+  // container, and with overflow visible it did not scroll and the page did not
+  // either -- Agent, Relationship, Links to and Hash were simply unreachable,
+  // with nothing on screen to say they existed. An audit panel that hides its
+  // own hashes is the wrong failure for the one view whose job is proof.
+  //
+  // The header goes in the SAME scroller as the rows: two scrollers desync and
+  // the labels drift off their columns, which is the bug this just fixed at
+  // desktop width.
+  const scroller = el('div', 'audit-scroll');
+  scroller.appendChild(head);
 
   // One row per entry: who, what was decided, and the hash that seals it.
   //
@@ -558,7 +569,8 @@ function renderAudit(result, container) {
     row.appendChild(hashCell);
     list.appendChild(row);
   }
-  container.appendChild(list);
+  scroller.appendChild(list);
+  container.appendChild(scroller);
 }
 
 /**
