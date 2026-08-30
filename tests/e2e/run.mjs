@@ -348,8 +348,15 @@ ok('and still says a refresh discards everything',
 
 // ── Navigation ────────────────────────────────────────────────────────────
 section('navigation');
-ok('back link points one level up, at the filename',
-  await page.evaluate(() => document.querySelector('.back').getAttribute('href')) === '../index.html');
+// There is deliberately no back link. The portfolio card opens this page with
+// target="_blank", so a "back to portfolio" control would navigate the NEW tab
+// away from the tool, leaving two portfolio tabs and no playground. Closing the
+// tab is the way back and the browser already provides it.
+ok('no back link — the tool opens in its own tab',
+  await page.evaluate(() => document.querySelectorAll('.back, #back-link').length) === 0);
+ok('every remaining link is http(s) or a same-file anchor',
+  await page.evaluate(() => [...document.querySelectorAll('a[href]')]
+    .every((a) => /^(https?:|#)/.test(a.getAttribute('href')))));
 
 // ── Layout ────────────────────────────────────────────────────────────────
 section('layout');

@@ -1159,34 +1159,16 @@ function buildControls() {
   }
 }
 
-/**
- * Back to the portfolio. Ported from resume.html's goBackSmart: going back
- * through history preserves the visitor's scroll position on the portfolio,
- * and the href is the fallback for a page opened directly with no history.
+/*
+ * There is no back link.
  *
- * Attached here rather than as an inline onclick, because CSP cannot hash an
- * inline event handler — allowing one would require 'unsafe-hashes' across the
- * whole policy.
+ * The portfolio card opens this page with target="_blank", so a "back to
+ * portfolio" control navigates the NEW tab to the portfolio -- leaving the
+ * visitor with two portfolio tabs and the tool gone. It only made sense while
+ * the tool replaced the page it was launched from.
+ *
+ * Closing the tab is the correct way back, and the browser already provides it.
  */
-$('back-link').addEventListener('click', (e) => {
-  // `history.length > 1` — what resume.html uses — is not a test for "arrived
-  // from the portfolio". A freshly opened tab already carries a history entry,
-  // so going back lands on about:blank or somewhere unrelated. Measured: opening
-  // this page directly and clicking back went to about:blank.
-  //
-  // The referrer answers the actual question. Same origin and a different path
-  // means they navigated here from another page of the site, so back returns
-  // them with their scroll position intact. Anything else — a bookmark, a fresh
-  // tab, a saved copy on file:// where origin is "null" — falls through to the
-  // href, which navigates properly.
-  try {
-    const from = new URL(document.referrer);
-    if (from.origin === location.origin && from.pathname !== location.pathname) {
-      e.preventDefault();
-      history.back();
-    }
-  } catch { /* no referrer, or an opaque origin: let the href do the work */ }
-});
 
 // ── Boot ──────────────────────────────────────────────────────────────────
 

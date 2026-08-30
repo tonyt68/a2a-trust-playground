@@ -84,12 +84,6 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
   max-width:1600px;margin:0 auto;padding:14px;gap:12px}
 
 /* Back link — reproduces shared.css .back rather than linking to it. */
-.back{display:inline-block;align-self:flex-start;font-size:12.5px;font-weight:600;
-  text-decoration:none;color:#b87ab5;
-  background:linear-gradient(90deg,#8a5a85 0%,#b87ab5 25%,#dda8d8 42%,#f0dff0 50%,
-    #dda8d8 58%,#b87ab5 75%,#8a5a85 100%);
-  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
-.back:hover{text-decoration:underline}
 
 /* ── Header ─────────────────────────────────────────────────────────────── */
 #header{border:1px solid var(--border);background:var(--panel-bg);border-radius:8px;
@@ -518,7 +512,6 @@ footer a{-webkit-text-fill-color:var(--accent);color:var(--accent);
        · no inline onclick. A CSP cannot hash an inline event handler — it
          needs 'unsafe-hashes', which weakens the whole policy for one link.
          The behaviour is attached from the module script instead. -->
-  <a class="back" id="back-link" href="../index.html">&larr; Portfolio</a>
 
   <header id="header">
     <div class="brand-block">
