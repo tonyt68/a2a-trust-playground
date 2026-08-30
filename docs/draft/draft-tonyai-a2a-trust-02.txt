@@ -1,0 +1,1400 @@
+
+
+
+
+Network Working Group                                        T. Trujillo
+Internet-Draft                                     Individual Submission
+Intended status: Informational                            28 August 2026
+Expires: 1 March 2027
+
+
+       Agent-to-Agent Trust, Identity, and Verifiable Provenance
+                       draft-tonyai-a2a-trust-02
+
+Abstract
+
+   This document defines a trust model for agent-to-agent (A2A)
+   interactions in multi-agent AI systems.  It specifies how agents
+   obtain verifiable identities via CA-signed templates, how spawn
+   chains are cryptographically established and validated, how dynamic
+   policies are governed under a dual-signature model, and how cross-
+   organizational agent interactions are explicitly authorized.  The
+   model applies existing PKI primitives (X.509, CRL, CSR) and
+   established identity patterns (OAuth 2.0, On-Behalf-Of) to the
+   problem of agent provenance.  This document does not address agent-
+   to-resource access control, human-in-the-loop orchestration, or agent
+   behavior, as those concerns belong to the resource enforcement layer
+   and the orchestration layer respectively.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 1 March 2027.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                  [Page 1]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   3
+   2.  Conventions Used in This Document . . . . . . . . . . . . . .   4
+   3.  Terminology . . . . . . . . . . . . . . . . . . . . . . . . .   4
+   4.  Problem Statement . . . . . . . . . . . . . . . . . . . . . .   4
+   5.  Existing Patterns and Gaps  . . . . . . . . . . . . . . . . .   5
+     5.1.  On-Behalf-Of (OBO)  . . . . . . . . . . . . . . . . . . .   5
+     5.2.  OAuth 2.0 Token Exchange (RFC 8693) . . . . . . . . . . .   5
+   6.  Agent Identity  . . . . . . . . . . . . . . . . . . . . . . .   5
+     6.1.  Certificate Profile . . . . . . . . . . . . . . . . . . .   6
+     6.2.  Certificate Signing Request Flow  . . . . . . . . . . . .   6
+     6.3.  Certificate Chain Structure . . . . . . . . . . . . . . .   7
+   7.  Template Structure  . . . . . . . . . . . . . . . . . . . . .   8
+     7.1.  Static Fields . . . . . . . . . . . . . . . . . . . . . .   8
+     7.2.  Dynamic Policy Bounds . . . . . . . . . . . . . . . . . .   8
+   8.  Spawn Chain Validation  . . . . . . . . . . . . . . . . . . .   9
+     8.1.  Two-Check Spawn Rule  . . . . . . . . . . . . . . . . . .   9
+     8.2.  Spawn Validation Sequence . . . . . . . . . . . . . . . .   9
+     8.3.  Scope Constraint  . . . . . . . . . . . . . . . . . . . .  10
+     8.4.  Audit Requirements  . . . . . . . . . . . . . . . . . . .  10
+   9.  Dynamic Policy Governance . . . . . . . . . . . . . . . . . .  11
+     9.1.  Two-Lane Model  . . . . . . . . . . . . . . . . . . . . .  11
+     9.2.  Ownership . . . . . . . . . . . . . . . . . . . . . . . .  11
+     9.3.  Dual Signature Requirement  . . . . . . . . . . . . . . .  11
+     9.4.  Dynamic Policy Document Structure . . . . . . . . . . . .  11
+     9.5.  Canonicalization  . . . . . . . . . . . . . . . . . . . .  12
+     9.6.  Signature and Hash Coverage . . . . . . . . . . . . . . .  13
+     9.7.  Policy Change Sequence  . . . . . . . . . . . . . . . . .  14
+     9.8.  Threat Coverage . . . . . . . . . . . . . . . . . . . . .  14
+   10. Template Versioning . . . . . . . . . . . . . . . . . . . . .  15
+     10.1.  Full Re-Verification Required  . . . . . . . . . . . . .  15
+     10.2.  Versioning Principle . . . . . . . . . . . . . . . . . .  15
+     10.3.  Non-Inheritance Rules  . . . . . . . . . . . . . . . . .  15
+     10.4.  Template Lifecycle . . . . . . . . . . . . . . . . . . .  15
+     10.5.  Cross-Organizational Grant Re-Issuance . . . . . . . . .  15
+   11. Cross-Organizational Agent Interaction  . . . . . . . . . . .  16
+     11.1.  Explicit Grant Requirement . . . . . . . . . . . . . . .  16
+     11.2.  Grant Structure  . . . . . . . . . . . . . . . . . . . .  16
+     11.3.  Trust Anchor Options . . . . . . . . . . . . . . . . . .  16
+     11.4.  Unilateral Revocation  . . . . . . . . . . . . . . . . .  16
+     11.5.  Federated Audit  . . . . . . . . . . . . . . . . . . . .  17
+
+
+
+Trujillo                  Expires 1 March 2027                  [Page 2]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   12. Revocation  . . . . . . . . . . . . . . . . . . . . . . . . .  17
+     12.1.  Template Revocation  . . . . . . . . . . . . . . . . . .  17
+     12.2.  Individual Agent Revocation  . . . . . . . . . . . . . .  17
+     12.3.  Automation Requirement . . . . . . . . . . . . . . . . .  17
+   13. Failure Model . . . . . . . . . . . . . . . . . . . . . . . .  17
+     13.1.  Fail Closed  . . . . . . . . . . . . . . . . . . . . . .  17
+   14. Conformance Requirements  . . . . . . . . . . . . . . . . . .  18
+     14.1.  Field Placement  . . . . . . . . . . . . . . . . . . . .  18
+     14.2.  CSR Validation . . . . . . . . . . . . . . . . . . . . .  18
+     14.3.  Test Vectors . . . . . . . . . . . . . . . . . . . . . .  18
+     14.4.  Conformance Certification  . . . . . . . . . . . . . . .  18
+     14.5.  Reference Implementation . . . . . . . . . . . . . . . .  18
+   15. IANA Considerations . . . . . . . . . . . . . . . . . . . . .  19
+   16. Security Considerations . . . . . . . . . . . . . . . . . . .  19
+     16.1.  Scope Escalation . . . . . . . . . . . . . . . . . . . .  19
+     16.2.  Replay Attacks . . . . . . . . . . . . . . . . . . . . .  20
+     16.3.  Compromised Templates  . . . . . . . . . . . . . . . . .  20
+     16.4.  Single Point of Compromise . . . . . . . . . . . . . . .  20
+     16.5.  Cross-Organizational Trust . . . . . . . . . . . . . . .  20
+     16.6.  PKI Does Not Enforce Authorization . . . . . . . . . . .  20
+     16.7.  Audit Integrity  . . . . . . . . . . . . . . . . . . . .  21
+   17. References  . . . . . . . . . . . . . . . . . . . . . . . . .  21
+     17.1.  Normative References . . . . . . . . . . . . . . . . . .  21
+     17.2.  Informative References . . . . . . . . . . . . . . . . .  22
+   Appendix A.  Changes since draft-tonyai-a2a-trust-01  . . . . . .  22
+   Appendix B.  Changes since draft-tonyai-a2a-trust-00  . . . . . .  24
+   Author's Address  . . . . . . . . . . . . . . . . . . . . . . . .  25
+
+1.  Introduction
+
+   Multi-agent AI systems introduce identity and authorization gaps that
+   existing standards do not fully address.  When Agent A spawns Agent
+   B, and Agent B calls a resource, no current standard defines how the
+   resource verifies that Agent B was legitimately spawned, that its
+   scope has not been escalated, or that its origin template is trusted.
+
+   This document proposes a trust model based on:
+
+   *  Agent templates as first-class, CA-signed identity artifacts.
+
+   *  Verifiable spawn chains where each agent's provenance is
+      cryptographically traceable to a registered template.
+
+   *  Two-lane governance separating static identity (cert-based) from
+      dynamic policy (OPA-gated).
+
+   *  Fail-closed enforcement at every verification step.
+
+
+
+
+Trujillo                  Expires 1 March 2027                  [Page 3]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   The model reuses proven PKI primitives and applies them to a new
+   surface -- agent identity -- rather than inventing new cryptographic
+   mechanisms.
+
+2.  Conventions Used in This Document
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in [RFC2119].
+
+3.  Terminology
+
+   Agent:  An ephemeral, autonomous process that performs tasks on
+      behalf of a user or another agent.
+
+   Agent Template:  A CA-signed artifact defining an agent's identity,
+      allowed scopes, spawn rules, and policy reference.
+
+   Template Registry:  The authoritative store of approved, signed agent
+      templates for an organization.
+
+   Template Registry CA:  The Certificate Authority that signs agent
+      templates -- the root of trust for the agent ecosystem.
+
+   Spawn:  The act of an agent instantiating a child agent from an
+      approved template.
+
+   Spawn Chain:  The ordered, cryptographically verifiable sequence of
+      agents from the root orchestrator to the current agent.
+
+   Policy Authority:  The entity responsible for countersigning dynamic
+      policy changes after automated gate validation.
+
+   CRL:  Certificate Revocation List -- the list of revoked template and
+      agent certificates maintained by the CA.
+
+   CSR:  Certificate Signing Request -- the template author's request to
+      the CA for a signed template certificate.
+
+   Cross-Org Grant:  An explicit, signed authorization allowing agents
+      from one organization to spawn from a template owned by another.
+
+4.  Problem Statement
+
+   Multi-agent orchestration creates identity and authorization gaps:
+
+      Agent A --> spawns --> Agent B --> calls --> Resource
+
+
+
+
+Trujillo                  Expires 1 March 2027                  [Page 4]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+                                  Figure 1
+
+   *  Which identity does the Resource see?
+
+   *  How does authorization propagate across the chain without
+      escalating?
+
+   *  If Agent B is compromised, can it impersonate Agent A?
+
+   *  Who owns the audit trail across the full chain?
+
+   *  How does the Resource prove Agent B was authorized to be spawned?
+
+   No current standard (W3C, IETF, or vendor) fully addresses agent
+   provenance in multi-hop chains.
+
+5.  Existing Patterns and Gaps
+
+5.1.  On-Behalf-Of (OBO)
+
+   Microsoft Entra ID OBO provides user-to-service delegation:
+
+      User --> Agent A (token A) -->
+      Agent A requests token for Agent B on behalf of user -->
+      Entra validates the chain -->
+      Issues scoped delegated token
+
+                                  Figure 2
+
+   Key insight: a trusted third party validates the delegation chain.
+   Agents do not self-assert trust.
+
+   OBO breaks down for agent-to-agent because agents are ephemeral,
+   agent spawning is dynamic, and no registry exists for agent
+   templates.
+
+5.2.  OAuth 2.0 Token Exchange (RFC 8693)
+
+   [RFC8693] defines scope constraint across delegation hops --
+   downstream tokens MUST be a subset of upstream grants.  This document
+   adopts that principle for agent scope inheritance.
+
+6.  Agent Identity
+
+   Agent identity MUST be established using X.509 certificate chains
+   [RFC5280].  This reuses the same trust model used by TLS and existing
+   workload identity systems.
+
+
+
+
+Trujillo                  Expires 1 March 2027                  [Page 5]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+6.1.  Certificate Profile
+
+   Certificates used for agent identity MUST conform to [RFC5280].  In
+   addition, a relying party validating an agent certificate MUST
+   enforce all of the following, and MUST refuse the certificate if any
+   is not satisfied:
+
+   *  An agent certificate MUST carry the basicConstraints extension
+      asserting cA = FALSE.  A certificate that omits basicConstraints
+      MUST be refused; the extension's absence MUST NOT be treated as
+      equivalent to cA = FALSE.
+
+   *  A Template Registry CA certificate MUST carry basicConstraints
+      asserting cA = TRUE, marked critical, and MUST assert keyCertSign
+      in its keyUsage extension.
+
+   *  Certificates MUST be signed using SHA-256 or a stronger digest.
+      Certificates signed with SHA-1 or MD5 MUST be refused irrespective
+      of key size.
+
+   *  Public keys MUST provide at least a 112-bit security level as
+      defined in [SP800-57] -- RSA 2048 or NIST P-256 or stronger.  A
+      relying party MUST refuse a certificate whose key falls below this
+      level.
+
+   An agent certificate asserting cA = TRUE is a certificate entitled to
+   issue further certificates.  Such an agent can create children
+   without presenting a request to the Template Registry CA, which
+   removes both checks required by Section 8.1 from the spawn path
+   entirely.  No signature is invalid in that scenario and no chain
+   fails to verify; the containment described in Section 7 is simply
+   never consulted.  This is the reason the constraint is stated
+   normatively here rather than left to the general RFC 5280 profile.
+
+   These requirements are necessary and not sufficient.  A certificate
+   satisfying all of them establishes identity only; it carries no
+   authorization.  See Section 16.6.
+
+6.2.  Certificate Signing Request Flow
+
+
+
+
+
+
+
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                  [Page 6]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+      Template Author
+          | defines template (scopes, spawn rules, TTL, owner)
+          | generates CSR
+          v
+      Template Registry CA
+          | validates template conformance
+          | signs the template certificate
+          v
+      Signed Agent Template (registered)
+          |
+          v
+      Orchestrator spawns agent from signed template
+          | agent receives certificate derived from template certificate
+          | CA chain proves provenance
+          v
+      Resource validates certificate chain:
+          - certificate signed by trusted template?
+          - template signed by CA?
+          - scope within bounds?
+          - ALLOW or DENY
+
+                                  Figure 3
+
+6.3.  Certificate Chain Structure
+
+    Template Registry CA (root of trust)
+        |
+        v
+    Orchestrator Agent Certificate
+        Subject:             orchestrator-v1
+        Issuer:              Template Registry CA
+        Owner:               owner@example.com
+        OrgID:               org-123
+        PermittedOperations: spawn, delegate
+        AllowedScopes:       read:data, write:data
+        CanSpawn:            [reader-template-v1], MaxChildren: 5
+        PolicyRef:           policy-store/orchestrator-v1/current
+        TTL:                 1h
+             |
+             v
+        Child Agent Certificate
+            Subject:             reader-agent-v1
+            Issuer:              orchestrator-v1
+            CA Chain:            orchestrator-v1 -> Template Registry CA
+            PermittedOperations: read only
+            AllowedScopes:       read:data (MUST be subset of parent)
+            TTL:                 15min (SHOULD be shorter than parent)
+
+
+
+
+Trujillo                  Expires 1 March 2027                  [Page 7]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+                                Figure 4
+
+7.  Template Structure
+
+7.1.  Static Fields
+
+   The following fields MUST be present in every agent template
+   certificate and MUST NOT be modified without full re-certification:
+
+      +=====================+==========+============================+
+      | Field               | Required | Description                |
+      +=====================+==========+============================+
+      | Subject             | REQUIRED | Unique template identifier |
+      +---------------------+----------+----------------------------+
+      | Issuer              | REQUIRED | Template Registry CA       |
+      +---------------------+----------+----------------------------+
+      | Owner               | REQUIRED | Verified identity of       |
+      |                     |          | template owner             |
+      +---------------------+----------+----------------------------+
+      | OrgID               | REQUIRED | CA-validated organization  |
+      |                     |          | identifier                 |
+      +---------------------+----------+----------------------------+
+      | PermittedOperations | REQUIRED | Operations this agent may  |
+      |                     |          | perform                    |
+      +---------------------+----------+----------------------------+
+      | AllowedScopes       | REQUIRED | Maximum scopes this agent  |
+      |                     |          | may hold                   |
+      +---------------------+----------+----------------------------+
+      | CanSpawn            | REQUIRED | Whitelist of permitted     |
+      |                     |          | child templates            |
+      +---------------------+----------+----------------------------+
+      | MaxChildren         | REQUIRED | Maximum concurrent child   |
+      |                     |          | agents                     |
+      +---------------------+----------+----------------------------+
+      | PolicyRef           | REQUIRED | Pointer to dynamic policy  |
+      |                     |          | store                      |
+      +---------------------+----------+----------------------------+
+      | TTL                 | REQUIRED | Maximum agent lifetime     |
+      +---------------------+----------+----------------------------+
+
+                                  Table 1
+
+7.2.  Dynamic Policy Bounds
+
+   Dynamic policies MUST be bounded by the static template fields.  A
+   dynamic policy MUST NOT grant scopes beyond AllowedScopes.  A dynamic
+   policy MUST NOT add spawn targets beyond CanSpawn.
+
+
+
+
+Trujillo                  Expires 1 March 2027                  [Page 8]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   A relying party MUST evaluate these bounds itself, on every
+   validation, against the static fields of the template certificate
+   naming the subject the policy governs.  This evaluation MUST be
+   independent of signature validity, and a policy exceeding the bounds
+   MUST be refused before it is applied, however many valid signatures
+   it carries.
+
+   The signatures required by Section 9.3 and the bounds required here
+   answer different questions.  The signatures establish who authorized
+   a change.  They do not, and cannot, establish that the change was
+   within the ceiling the template set, because the ceiling is stated in
+   a certificate that no signature over the policy covers.  An
+   implementation that treats a valid dual signature as sufficient
+   authority to apply a policy has removed the only mechanism bounding
+   what a policy may grant.
+
+   Refusal under this section is a distinct condition from a signature
+   failure, and implementations SHOULD report it distinctly: the
+   document is authentic and its content is not permitted.  Reporting it
+   as a signature failure misdirects the operator to the wrong lane of
+   Section 9.1.
+
+8.  Spawn Chain Validation
+
+8.1.  Two-Check Spawn Rule
+
+   Every spawn MUST pass two independent checks.  Either check failing
+   MUST result in spawn denial with no fallback.
+
+   Check 1 -- Static (CanSpawn in certificate): The requested child
+   template MUST appear in the spawning agent's CanSpawn list.
+
+   Check 2 -- Dynamic (Registry live lookup): The requested child
+   template MUST be currently registered, CA-signed, not self-signed,
+   owned by an authorized party, and not present in the current CRL.
+
+   Rationale: CanSpawn alone is insufficient because the certificate may
+   be stale and a template may have been revoked since issuance.
+   Registry lookup alone is insufficient because any party could forge a
+   request claiming any template.  Both checks MUST pass.
+
+8.2.  Spawn Validation Sequence
+
+
+
+
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                  [Page 9]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+      1.  CanSpawn check -- child template in CanSpawn list?
+          NO  --> DENY, audit log
+          YES --> continue
+
+      2.  Registry check -- registered, CA-signed, not revoked?
+          NO  --> DENY, audit log
+          YES --> continue
+
+      3.  Scope check -- requested scope subset of parent scopes?
+          NO  --> DENY, audit log
+          YES --> continue
+
+      4.  MaxChildren check -- current children < MaxChildren?
+          NO  --> DENY, audit log
+          YES --> spawn approved
+
+      5.  Child certificate issued with:
+          - parent identity embedded (delegation chain)
+          - scope equal to requested scope (not exceeding parent)
+          - spawn timestamp and nonce (replay prevention)
+          - audit log entry written
+
+                                  Figure 5
+
+8.3.  Scope Constraint
+
+   A child agent's AllowedScopes MUST be a subset of the parent agent's
+   AllowedScopes: every scope granted to the child MUST also be held by
+   the parent.  A child MUST NOT be granted any scope the parent does
+   not itself hold; scope escalation across agent hops is explicitly
+   prohibited.  Equality is permitted -- a child MAY be granted the same
+   scope set as its parent, or fewer.
+
+   Example:
+
+      Parent has:  read:data, write:data
+      Child gets:  read:data              -- valid
+      Child gets:  read:data, write:data  -- valid (same as parent)
+      Child gets:  admin:data             -- MUST be rejected
+
+                                  Figure 6
+
+8.4.  Audit Requirements
+
+   Every spawn event MUST be logged with: spawning agent identity, child
+   template identity, requested scope, granted scope, timestamp, outcome
+   (ALLOWED or DENIED), and reason if denied.
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 10]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+9.  Dynamic Policy Governance
+
+9.1.  Two-Lane Model
+
+   Template certificate (static): WHO the agent is and WHO it can spawn.
+   Changes require full re-certification.
+
+   Dynamic policy (fast lane): WHAT the agent can do within the bounds
+   of the template certificate.  Changes require dual signature
+   (Section 9.3).
+
+   Dynamic policies MUST NOT exceed the bounds defined in the static
+   template certificate.
+
+9.2.  Ownership
+
+   Template ownership MUST be established at certificate signing time
+   and embedded in the Owner and OrgID fields.  Only the verified owner
+   of the organization that signed the template MAY submit policy
+   changes.
+
+9.3.  Dual Signature Requirement
+
+   Every policy change MUST be signed by two independent parties:
+
+   1.  Owner -- proves the right to change the policy.
+
+   2.  Policy Authority -- proves the policy passed automated validation
+       gates.
+
+   Neither signature alone is sufficient.  Both MUST be present and
+   valid for a policy to be accepted.
+
+      Owner key  +  Policy Authority key  =  policy accepted
+          ^                  ^
+      who owns it        passed the gates
+
+                                  Figure 7
+
+9.4.  Dynamic Policy Document Structure
+
+   A dynamic policy document MUST contain the following fields.  This is
+   the complete set; a document containing any other field MUST be
+   refused, since an unrecognized field is either meaningless or an
+   attempt to convey authority the profile does not define.
+
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 11]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+     +==============+==========+=====================================+
+     | Field        | Required | Description                         |
+     +==============+==========+=====================================+
+     | Subject      | REQUIRED | Identifier of the agent this policy |
+     |              |          | governs; MUST match the Subject of  |
+     |              |          | the template certificate            |
+     +--------------+----------+-------------------------------------+
+     | Owner        | REQUIRED | Submitting owner; MUST match Owner  |
+     |              |          | in the template certificate         |
+     +--------------+----------+-------------------------------------+
+     | OrgID        | REQUIRED | Submitting organization; MUST match |
+     |              |          | OrgID in the template certificate   |
+     +--------------+----------+-------------------------------------+
+     | Scopes       | REQUIRED | Scopes granted by this policy;      |
+     |              |          | bounded by AllowedScopes            |
+     +--------------+----------+-------------------------------------+
+     | SpawnTargets | OPTIONAL | Spawn targets granted by this       |
+     |              |          | policy; bounded by CanSpawn.        |
+     |              |          | Absent means none are granted       |
+     +--------------+----------+-------------------------------------+
+     | Version      | REQUIRED | Monotonically increasing integer,   |
+     |              |          | scoped to Subject                   |
+     +--------------+----------+-------------------------------------+
+     | IssuedAt     | REQUIRED | Timestamp of issuance, RFC 3339     |
+     +--------------+----------+-------------------------------------+
+     | NotAfter     | OPTIONAL | Expiry of this policy; MUST NOT     |
+     |              |          | exceed the template TTL             |
+     +--------------+----------+-------------------------------------+
+
+                  Table 2: Dynamic Policy Document Fields
+
+   Version is scoped to the Subject, not global.  A relying party MUST
+   refuse a policy whose Version is not strictly greater than the
+   Version of the policy currently in force for that Subject.
+
+9.5.  Canonicalization
+
+   Signatures and hashes defined by this document are computed over
+   bytes, so the mapping from a policy document to those bytes MUST be
+   deterministic and identical across implementations.
+
+
+
+
+
+
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 12]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   Wherever this document requires a canonical form -- of a policy
+   document, of any field subset thereof, or of an audit log entry --
+   that canonical form MUST be the JSON Canonicalization Scheme (JCS)
+   serialization defined in [RFC8785].  A single canonical form is
+   specified for all of them deliberately: an implementation carrying
+   two serializations will eventually apply the wrong one, and the
+   resulting failure presents as a signature or integrity error with no
+   indication that serialization was the cause.
+
+   JCS is specified rather than described here because a bespoke
+   serialization would require this document to define property
+   ordering, string escaping, and number formatting correctly and
+   completely, and any error in that definition surfaces to implementers
+   as a signature failure that appears to be a cryptographic fault.
+   Serializations that differ only in whitespace, key order, or the
+   escaping of non-ASCII characters produce different bytes and
+   therefore different signatures; implementers MUST NOT assume a
+   language's default JSON encoder produces the canonical form, as most
+   do not.
+
+9.6.  Signature and Hash Coverage
+
+   Both signatures required by Section 9.3 MUST be computed over the
+   canonical form (Section 9.5) of the complete set of fields defined in
+   Section 9.4.  No field in that table is excluded from either
+   signature.
+
+   In particular, Version MUST be inside the signed preimage.  Version
+   exists to prevent replay, and it cannot serve that purpose while it
+   remains modifiable without invalidating a signature: an attacker
+   holding no key can otherwise take a superseded but validly signed
+   policy, increment its Version, and present it as current.  Both
+   signatures verify, the content hash matches, and the version reads as
+   current.  The same reasoning applies to Subject: a signature that
+   does not bind the policy to the agent it governs permits a policy
+   issued for one agent to be presented for another.
+
+   The content hash required by Section 9.7 MUST be SHA-256, or a
+   stronger digest, computed over the same canonical form and the same
+   field set as the signatures.  The hash field itself is stored
+   alongside the policy document and MUST NOT be included in its own
+   preimage.
+
+   The signatures and the content hash are stored with the policy
+   document but are not part of it.  A relying party MUST NOT accept a
+   document in which they appear as policy fields.
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 13]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+9.7.  Policy Change Sequence
+
+      1.  Identity and ownership verification
+          - requester matches Owner in template certificate?
+          - requester OrgID matches certificate OrgID?
+          NO  --> rejected, audit logged
+
+      2.  Automated gate (OPA):
+          - scope within AllowedScopes?
+          - spawn targets within CanSpawn?
+          - no conflicts with active policies?
+          ANY FAIL --> rejected
+
+      3.  Dual signature applied:
+          Owner signs, Policy Authority countersigns
+
+      4.  Policy stored with dual signature, version, timestamp,
+          and content hash
+
+      5.  Agent validates at runtime:
+          - both signatures valid?
+          - version current? (replay prevention)
+          - hash matches? (tamper detection)
+          - policy within template certificate bounds?
+          ANY FAIL --> DENY, audit logged
+
+                                  Figure 8
+
+9.8.  Threat Coverage
+
+    +========================+====================+===================+
+    | Scenario               | Single Sig Gap     | Dual Sig Fix      |
+    +========================+====================+===================+
+    | Rogue Policy Authority | Pushes bad policy  | Owner key missing |
+    +------------------------+--------------------+-------------------+
+    | Rogue owner            | Bypasses OPA gates | PA won't          |
+    |                        |                    | countersign       |
+    +------------------------+--------------------+-------------------+
+    | Compromised owner key  | Attacker modifies  | OPA gates         |
+    |                        |                    | enforced          |
+    +------------------------+--------------------+-------------------+
+    | Compromised Policy     | Pushes bad policy  | Owner key missing |
+    | Auth                   |                    |                   |
+    +------------------------+--------------------+-------------------+
+
+                                  Table 3
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 14]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+10.  Template Versioning
+
+10.1.  Full Re-Verification Required
+
+   A new template version MUST undergo full re-verification from
+   scratch.  Trust MUST NOT be inherited from a previous version.
+
+   Rationale: inheriting trust from v1 would allow a compromised v1
+   certificate to bootstrap trust for v2.
+
+10.2.  Versioning Principle
+
+   Everything on the old template chain continues to work unchanged as
+   long as the certificate is valid.  New connections and functionality
+   are opt-in -- only available after the new template chain is fully
+   verified and explicitly adopted.
+
+10.3.  Non-Inheritance Rules
+
+   The following MUST NOT be inherited from a previous version:
+
+   *  Trust chain
+
+   *  Cross-organizational grants
+
+   *  CanSpawn list
+
+   *  Dynamic policies
+
+10.4.  Template Lifecycle
+
+   ACTIVE:  Template is trusted.  New spawns accepted.
+
+   DISABLED:  No new spawns.  Existing agents run to TTL expiry.
+      Reversible.
+
+   DELETED:  Certificate revoked, CRL updated, registry entry removed.
+      Irreversible.  Audit log preserved.
+
+   Disable SHOULD precede delete.  Implementations SHOULD enforce a
+   mandatory waiting period between DISABLED and DELETED.
+
+10.5.  Cross-Organizational Grant Re-Issuance
+
+   Cross-organizational grants MUST be explicitly re-issued for each new
+   template version.  Grants MUST NOT automatically roll over on version
+   upgrade.
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 15]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+11.  Cross-Organizational Agent Interaction
+
+11.1.  Explicit Grant Requirement
+
+   Cross-organizational agent spawning MUST be explicitly authorized by
+   the resource-owning organization.  No implicit trust exists between
+   organizations.
+
+11.2.  Grant Structure
+
+   A cross-organizational grant MUST contain:
+
+   +===============+===================================================+
+   | Field         | Description                                       |
+   +===============+===================================================+
+   | Grantor       | Resource-owning organization                      |
+   +---------------+---------------------------------------------------+
+   | Grantee       | Requesting organization                           |
+   +---------------+---------------------------------------------------+
+   | Template      | Specific template identifier                      |
+   +---------------+---------------------------------------------------+
+   | AllowedScopes | MUST be subset of template scopes                 |
+   +---------------+---------------------------------------------------+
+   | TTL           | Grant validity period                             |
+   +---------------+---------------------------------------------------+
+   | MaxSpawns     | Maximum concurrent agents permitted               |
+   +---------------+---------------------------------------------------+
+   | Signature     | Dual signature (grantor owner +                   |
+   |               | Policy Authority)                                 |
+   +---------------+---------------------------------------------------+
+
+                                  Table 4
+
+11.3.  Trust Anchor Options
+
+   Federated CA:  Both organizations trust a shared root CA.
+
+   Explicit CA trust:  Org-B explicitly trusts Org-A's CA.
+
+   Third-party CA:  Both organizations use a public CA.
+
+11.4.  Unilateral Revocation
+
+   The granting organization MAY revoke a cross-organizational grant
+   without the cooperation of the receiving organization.  Upon
+   revocation, all agents spawned under the affected grant MUST be
+   treated as untrusted on next validation.
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 16]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+11.5.  Federated Audit
+
+   Each organization MUST maintain its own independent audit trail.
+   Audit records MUST NOT depend on the other organization's systems.
+
+12.  Revocation
+
+12.1.  Template Revocation
+
+   Template revocation MUST be performed by recording the template
+   certificate as revoked in the CA's revocation state -- an X.509 CRL,
+   an OCSP responder, or an equivalent revocation registry consulted on
+   every validation.  All agent certificates derived from a revoked
+   template MUST be treated as untrusted on the next revocation check.
+
+12.2.  Individual Agent Revocation
+
+   Individual agents MAY be revoked by explicit certificate revocation
+   or by removal of authorization relationships at the resource layer.
+
+12.3.  Automation Requirement
+
+   Routine revocation (TTL expiry, task completion) MUST be fully
+   automated.  Human involvement SHOULD be reserved for incident
+   response and high-impact decisions.
+
+13.  Failure Model
+
+13.1.  Fail Closed
+
+   Any verification step that cannot be completed MUST result in DENY.
+   This includes:
+
+   *  CA unreachable
+
+   *  Registry unreachable
+
+   *  CRL unreachable
+
+   *  Certificate expired or revoked
+
+   *  Scope escalation attempt
+
+   *  Policy invalid or unsigned
+
+   *  Dual signature missing or invalid
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 17]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   Implementations MUST NOT provide a degraded mode that allows partial
+   spawning or execution when verification infrastructure is
+   unavailable.
+
+14.  Conformance Requirements
+
+14.1.  Field Placement
+
+   Implementations MUST place every field in the location specified by
+   this document.  Variable element placement is NOT permitted.
+
+14.2.  CSR Validation
+
+   Non-conforming CSRs MUST be rejected by the CA.  A non-conforming
+   template MUST NOT be signed.
+
+14.3.  Test Vectors
+
+   Implementations MUST provide test vectors -- concrete examples of
+   valid and invalid template chains -- for conformance validation.
+
+14.4.  Conformance Certification
+
+   Implementations claiming conformance with this document MUST pass
+   conformance certification before shipping.
+
+14.5.  Reference Implementation
+
+   A reference implementation SHOULD be made available including:
+
+   *  Template Registry CA
+
+   *  Spawn chain validation
+
+   *  SDK with certificate chain validation, registry lookup, and CRL
+      check handling
+
+   *  Template linter for pre-submission CSR validation
+
+   Three independent implementations exist at the time of writing.  Each
+   states the revision it was written and verified against, and
+   continues to state that revision until someone re-reads the newer
+   text and re-runs the vectors.  An implementation pinned to an earlier
+   revision remains a correct implementation of that revision; a version
+   string is a conformance claim rather than a label, and advancing one
+   without re-verifying asserts conformance nobody has tested.
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 18]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   +======================+==========+=================================+
+   | Implementation       | Revision | Notes                           |
+   +======================+==========+=================================+
+   | a2a-trust-playground | -02      | Browser implementation, no      |
+   |                      |          | installation or backend.        |
+   |                      |          | Validates a chain against       |
+   |                      |          | every check in this             |
+   |                      |          | document and reports the        |
+   |                      |          | clause governing each           |
+   |                      |          | refusal.  Source:               |
+   |                      |          | https://github.com/tonyt68/     |
+   |                      |          | a2a-trust-playground            |
+   +----------------------+----------+---------------------------------+
+   | ietf-a2a-trust-poc   | -00      | Registry CA, spawn              |
+   |                      |          | validation and policy           |
+   |                      |          | governance services.            |
+   |                      |          | Source:                         |
+   |                      |          | https://github.com/tonyt68/     |
+   |                      |          | ietf-a2a-trust-poc              |
+   +----------------------+----------+---------------------------------+
+   | hack-my-own-code     | -00      | Adversarial implementation      |
+   |                      |          | that attacks its own            |
+   |                      |          | conformance.  Source:           |
+   |                      |          | https://github.com/tonyt68/     |
+   |                      |          | hack-my-own-code                |
+   +----------------------+----------+---------------------------------+
+
+                       Table 5: Known Implementations
+
+   The changes in this revision were surfaced by building the first of
+   these against the -01 text and attacking it, rather than by review of
+   the text alone.  Implementers are encouraged to report what the
+   document does not say clearly enough, which is a different and more
+   useful signal than agreement with it.
+
+15.  IANA Considerations
+
+   This document has no IANA actions.
+
+16.  Security Considerations
+
+16.1.  Scope Escalation
+
+   Implementations MUST enforce at every hop that child agent scopes are
+   a subset of parent scopes: child scopes are contained within parent
+   scopes, and no scope may be introduced that the parent does not
+   already hold.  Failure to enforce this allows privilege escalation
+   across the agent chain.
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 19]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+16.2.  Replay Attacks
+
+   Spawn requests MUST include a timestamp and nonce.  Implementations
+   MUST reject spawn requests where the timestamp exceeds a defined
+   freshness window or the nonce has been seen previously.
+
+16.3.  Compromised Templates
+
+   A compromised template certificate MUST be revoked immediately.  A
+   single CRL update invalidates all downstream agent certificates
+   derived from that template.
+
+16.4.  Single Point of Compromise
+
+   The dual signature requirement (Section 9.3) ensures no single
+   compromised party can push unauthorized policy changes.  CA
+   compromise requires full ecosystem re-issuance.
+
+16.5.  Cross-Organizational Trust
+
+   Cross-organizational grants MUST be explicitly issued.  Implicit
+   trust between organizations is prohibited.
+
+16.6.  PKI Does Not Enforce Authorization
+
+   Because agent identity is carried in X.509 certificates and the chain
+   is verified on every validation, it is natural to assume the
+   certificate chain also constrains what an agent may do.  It does not,
+   and an implementation built on that assumption is unprotected while
+   appearing rigorous.
+
+   X.509 carries no representation of the scopes defined by this
+   document.  AllowedScopes, CanSpawn and MaxChildren are conveyed in
+   the template, and no certificate path validation algorithm inspects
+   them.  A conformant X.509 validator presented with an agent
+   certificate whose associated template claims scopes far beyond those
+   its parent holds will report success, because the certificate is
+   genuinely valid and correctly issued.  The over-scoping is not a
+   defect the validator is looking for.
+
+   The nameConstraints extension does not close this gap.  It constrains
+   the namespace within which a CA may issue, not the authority a
+   subject may claim once issued.  Likewise certificatePolicies
+   expresses which policies a chain supports, not whether a child
+   exceeded its parent, and policy processing is disabled by default in
+   common implementations.
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 20]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   Consequently Section 7.2 and Section 8.3 are load-bearing
+   implementation logic.  They are not restatements of a property the
+   certificate chain already guarantees, and an implementation that
+   omits them because "the chain verifies" has no containment at all.
+   Certificate validity establishes identity.  Authorization is
+   evaluated separately, every time.
+
+16.7.  Audit Integrity
+
+   Audit logs MUST be tamper-evident.  Logs MUST NOT be deletable by
+   agents or orchestrators.  Audit log infrastructure SHOULD be outside
+   the control of the agent ecosystem itself.
+
+   Each entry's hash MUST be computed as SHA-256, or a stronger digest,
+   over the canonical form (Section 9.5) of the entry's fields including
+   the previous entry's hash, and excluding the entry's own hash field.
+   As with policy documents, an unspecified preimage is not a detail:
+   two implementations hashing different field sets each read the
+   other's chain as broken, and a chain that cannot be verified across
+   implementations provides no evidence to anyone but its author.
+
+17.  References
+
+17.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997,
+              <https://www.rfc-editor.org/info/rfc2119>.
+
+   [RFC8785]  Rundgren, A., Jordan, B., and S. Erdtman, "JSON
+              Canonicalization Scheme (JCS)", RFC 8785, June 2020,
+              <https://www.rfc-editor.org/info/rfc8785>.
+
+   [SP800-57] Barker, E., "Recommendation for Key Management: Part 1 -
+              General", NIST SP 800-57 Part 1 Rev. 5, May 2020,
+              <https://doi.org/10.6028/NIST.SP.800-57pt1r5>.
+
+   [RFC5280]  Cooper, D., Santesson, S., Farrell, S., Boeyen, S.,
+              Housley, R., and W. Polk, "Internet X.509 Public Key
+              Infrastructure Certificate and Certificate Revocation List
+              (CRL) Profile", RFC 5280, May 2008,
+              <https://www.rfc-editor.org/info/rfc5280>.
+
+   [RFC6749]  Hardt, D., "The OAuth 2.0 Authorization Framework",
+              RFC 6749, October 2012,
+              <https://www.rfc-editor.org/info/rfc6749>.
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 21]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   [RFC8693]  Jones, M., Campbell, A., and C. Mortimore, "OAuth 2.0
+              Token Exchange", RFC 8693, January 2020,
+              <https://www.rfc-editor.org/info/rfc8693>.
+
+17.2.  Informative References
+
+   [NIST800-207]
+              Rose, S., Borchert, O., Mitchell, S., and S. Connelly,
+              "Zero Trust Architecture", NIST SP 800-207, August 2020.
+
+   [SPIFFE]   SPIFFE Project, "Secure Production Identity Framework for
+              Everyone", <https://spiffe.io>.
+
+   [OpenFGA]  OpenFGA Project, "OpenFGA Specification",
+              <https://openfga.dev>.
+
+   [VAULTPKI] HashiCorp, "Vault PKI Secrets Engine",
+              <https://developer.hashicorp.com/vault/docs/secrets/pki>.
+
+Appendix A.  Changes since draft-tonyai-a2a-trust-01
+
+   All changes in this revision were surfaced by building a second,
+   independent implementation of the -01 text and attacking it.  Changes
+   are described below by their effect on a conformant implementation
+   rather than by intent: where an implementation conforming to -01 must
+   change to remain conformant, this is stated plainly, because an
+   implementer reading this appendix is deciding whether re-verification
+   is required.
+
+   Four changes below are breaking.  Two implementations exist at the
+   time of writing, both under the author's control; the cost of these
+   changes is at its minimum now and rises permanently once a third-
+   party implementation ships.
+
+   *Security fix -- breaking.*
+
+   *  Section 9.6 (Signature and Hash Coverage) is new, and requires
+      that Version and Subject be inside the signed preimage.  In -01
+      the policy version was listed in Section 9.4 as a value stored
+      alongside the signature, and the text never required the signature
+      to cover it.  Both existing implementations read it that way and
+      neither signed the version, which defeats the replay prevention
+      that Section 9.4 assigns to that field: an attacker holding no key
+      can take a superseded but validly signed policy, increment the
+      version, and have it accepted -- both signatures verify, the
+      content hash matches, and the version reads as current.
+      Implementations MUST re-sign existing policies under the new
+      coverage.  Signatures produced under -01 do not verify under -02.
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 22]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   *Interoperability -- breaking.*
+
+   *  Section 9.5 (Canonicalization) is new, and normatively specifies
+      JCS (RFC 8785) as the serialization for all signatures and hashes.
+      -01 contained no canonicalization text of any kind, which made
+      Section 9.3 impossible to implement interoperably: a signature is
+      over bytes, and nothing in -01 said how those bytes are produced.
+      The only way to implement -01's dual signature was to read an
+      existing implementation's source.  JCS differs from what both
+      current implementations do, so both must change and all existing
+      signatures and test vectors are invalidated.  An existing
+      implementation is not conformant to -02 by default.
+
+   *  Section 9.4 (Dynamic Policy Document Structure) is new.  -01
+      required the dynamic policy to be signed, hashed, stored and
+      integrity-checked without ever defining what it contains, leaving
+      each implementer to invent a field set.  Different invented sets
+      produce different signatures and different hashes for the same
+      policy, and each implementation reads the other's documents as
+      tampered with.  Implementations whose field set differs from the
+      table in Section 9.4 must change.
+
+   *New normative requirements -- additive.*
+
+   *  Section 6.3 (Certificate Profile) is new.  -01 mandated X.509 and
+      specified no profile: no key strength, no digest floor, and no
+      basicConstraints requirement.  Three certificates that verify
+      under a conformant X.509 validator were accepted as agent
+      identities by an implementation conforming to -01 -- one asserting
+      cA = TRUE, one signed with SHA-1, and one carrying no
+      basicConstraints at all.  The first is also a containment failure:
+      an agent whose certificate permits it to issue certificates can
+      create children without presenting a request to the CA, which
+      removes both checks in Section 8.1 from the spawn path without
+      invalidating any signature.  Implementations already issuing cA =
+      FALSE, SHA-256, RSA-2048 leaves satisfy this section unchanged,
+      but MUST add the corresponding checks on validation.
+
+   *  Section 7.2 now states who enforces the dynamic policy bounds,
+      when, and with what result.  -01 stated the rule and named no
+      enforcement point, so an implementation that never checked it and
+      one that checked it before signature verification both read as
+      conformant while returning different results for the same
+      document.  The bounds MUST now be evaluated independently of
+      signature validity and refused before the policy is applied.
+
+   *Rename -- breaking.*
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 23]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   *  The Section 7.1 static field KeyUsage is renamed
+      PermittedOperations.  The field carries the operations an agent
+      may perform -- spawn, delegate, read -- and is unrelated to the
+      X.509 keyUsage extension, whose values are digitalSignature,
+      keyCertSign and the rest of the RFC 5280 set.  The collision was
+      latent while this document never referred to the X.509 extension;
+      Section 6.3 now does, normatively, so a single document used one
+      name for two unrelated things.  RFC 5280 owns the name keyUsage,
+      so the template field is the one that moves.  The new name is the
+      description this document already gave the field.  Implementations
+      MUST rename the corresponding metadata field; the value space is
+      unchanged.
+
+   *Removal -- breaking for any implementation reading the field.*
+
+   *  The ScopeInherit field is removed from the Section 7.1 static
+      field table.  It was REQUIRED in -00 and -01 with no defined value
+      space, and the value both existing implementations populate it
+      with, "strict-subset", contradicts Section 8.3 as clarified in
+      -01, which explicitly permits equality.  Neither implementation
+      reads the value, so the field conveyed no capability; Section 8.3
+      already determines inheritance completely.  An implementation that
+      enforced the field literally would deny a child legitimately
+      holding its parent's full scope set, which is the misreading -01
+      was published to prevent.
+
+   *Non-normative.*
+
+   *  Section 16.7 (PKI Does Not Enforce Authorization) is new.  It
+      states that certificate validity establishes identity and not
+      authorization, that neither nameConstraints nor
+      certificatePolicies closes that gap, and that Sections 7.2 and 8.3
+      are therefore load-bearing implementation logic rather than
+      restatements of a guarantee the chain already provides.  No
+      behaviour changes; the omission was judged the most likely to
+      cause an implementer to build something that verifies correctly
+      and contains nothing.
+
+Appendix B.  Changes since draft-tonyai-a2a-trust-00
+
+   Clarified two areas identified as ambiguous during development of a
+   reference implementation:
+
+
+
+
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 24]
+
+Internet-Draft                  A2A Trust                    August 2026
+
+
+   *  Section 8.3/16.1 scope-subset language now explicitly permits
+      equality between a child's requested scope and its parent's
+      granted scope; only escalation (a superset) is prohibited.  The
+      prior wording could be misread as requiring a strict/proper
+      subset, which would wrongly deny a child that legitimately needs
+      the same scope as its parent.
+
+   *  Section 12.1 revocation-check language now explicitly accepts an
+      X.509 CRL, an OCSP responder, or an equivalent revocation
+      registry, rather than implying a CRL specifically.  The normative
+      requirement is that revocation state is consulted on every
+      validation, not the specific mechanism used to represent it.
+
+   Neither change alters the normative requirements themselves; both
+   make explicit what the -00 text intended.  Both were surfaced by
+   building and red-teaming a conformance reference implementation
+   against the -00 text.
+
+Author's Address
+
+   Tony Trujillo (tonyai)
+   Individual Submission
+   Email: founder@phalanxaisec.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Trujillo                  Expires 1 March 2027                 [Page 25]

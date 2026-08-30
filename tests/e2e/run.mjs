@@ -326,6 +326,26 @@ ok('Copy JSON is present as the only export',
   await page.evaluate(() => [...document.querySelectorAll('.admin-btn')]
     .some((b) => b.firstChild.textContent === 'Copy JSON')));
 
+// The footer makes privacy claims a visitor mostly cannot verify. It must not
+// also make one they CAN — it used to say "there is no reset button because
+// refresh is the reset", which stopped being true the moment Reset Certs and
+// Reset the audit chain existed. A visibly false claim discredits the ones
+// beside it that have to be taken on trust.
+section('the footer does not contradict the page');
+const footerText = await page.evaluate(() => document.getElementById('footer').textContent);
+const resetButtons = await page.evaluate(() => [...document.querySelectorAll('button')]
+  .map((b) => b.firstChild?.textContent?.trim() ?? '')
+  .filter((t) => /^Reset\b/.test(t)));
+ok('the page has reset buttons', resetButtons.length >= 2, resetButtons.join(', '));
+ok('the footer does not deny that they exist',
+  !/no reset button/i.test(footerText), footerText.slice(0, 90));
+ok('the footer still makes its privacy claims',
+  /nothing is transmitted/i.test(footerText)
+  && /no cookies/i.test(footerText)
+  && /localStorage/i.test(footerText));
+ok('and still says a refresh discards everything',
+  /refresh/i.test(footerText) && /discard/i.test(footerText));
+
 // ── Navigation ────────────────────────────────────────────────────────────
 section('navigation');
 ok('back link points one level up, at the filename',

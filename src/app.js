@@ -367,6 +367,65 @@ function failureLocation(result) {
   return { path, values: quoted };
 }
 
+/**
+ * Section titles from the published draft, so a clause reference explains itself.
+ *
+ * "§6.1" on its own tells a visitor nothing. The reference is the whole point of
+ * the page -- the tool refuses something and names the clause -- so leaving it as
+ * an opaque number asks the reader to go and look it up, which nobody does.
+ *
+ * Generated from the -02 text rather than typed: -02 inserted sections, which
+ * renumbered everything after them, and the code was still citing -01 positions.
+ * ERR_AUDIT_CHAIN_BROKEN pointed at §16.6, which in -02 is "PKI Does Not Enforce
+ * Authorization" rather than "Audit Integrity" -- a confidently wrong citation,
+ * which is worse than a missing one.
+ */
+const SECTION_TITLES = {
+  '6': 'Agent Identity',
+  '6.1': 'Certificate Profile',
+  '6.2': 'Certificate Signing Request Flow',
+  '7': 'Template Structure',
+  '7.2': 'Dynamic Policy Bounds',
+  '8.1': 'Two-Check Spawn Rule',
+  '8.3': 'Scope Constraint',
+  '9': 'Dynamic Policy Governance',
+  '9.2': 'Ownership',
+  '9.3': 'Dual Signature Requirement',
+  '9.4': 'Dynamic Policy Document Structure',
+  '9.6': 'Signature and Hash Coverage',
+  '10.4': 'Template Lifecycle',
+  '12': 'Revocation',
+  '12.3': 'Automation Requirement',
+  '13.1': 'Fail Closed',
+  '16.1': 'Scope Escalation',
+  '16.2': 'Replay Attacks',
+  '16.6': 'PKI Does Not Enforce Authorization',
+  '16.7': 'Audit Integrity'
+};
+
+/** Deep link into the published draft, opened in one reused tab. */
+const DRAFT_HTML = 'https://www.ietf.org/archive/id/draft-tonyai-a2a-trust-02.html';
+
+/**
+ * A clause reference: the number, its title on hover, and a link to the text.
+ *
+ * `target` is a NAMED window, not `_blank`. The first click opens a tab; every
+ * later click navigates that same tab to the new anchor instead of leaving a
+ * trail of them behind.
+ */
+function sectionRef(section, cls = 'sec') {
+  if (!section) return el('span', cls, '\u2014');
+  const title = SECTION_TITLES[section];
+  const a = el('a', cls, `\u00A7${section}`);
+  a.href = `${DRAFT_HTML}#section-${section}`;
+  a.target = 'a2a-draft';
+  a.rel = 'noopener';
+  a.title = title
+    ? `\u00A7${section} ${title} \u2014 opens the draft`
+    : `\u00A7${section} \u2014 opens the draft`;
+  return a;
+}
+
 /** Which phase each modification button exercises, for grouping the controls. */
 const PHASES = [
   { name: 'IDENTITY',  asks: 'the certificates themselves' },
@@ -421,7 +480,7 @@ function renderLog(result) {
     const cls = stage.result === 'PASS' ? 'pass' : stage.result === 'DENY' ? 'deny' : 'na';
     const row = el('div', `log-row ${cls}`);
     row.appendChild(el('span', 'ln', String(stage.n)));
-    row.appendChild(el('span', 'sec', stage.section ? `§${stage.section}` : '—'));
+    row.appendChild(sectionRef(stage.section));
     row.appendChild(el('span', 'res', stage.result));
     row.appendChild(el('span', 'detail', stage.detail));
 
@@ -442,7 +501,7 @@ function renderLog(result) {
   for (const na of NOT_APPLICABLE) {
     const row = el('div', 'log-row na');
     row.appendChild(el('span', 'ln', '—'));
-    row.appendChild(el('span', 'sec', `§${na.section}`));
+    row.appendChild(sectionRef(na.section));
     row.appendChild(el('span', 'res', 'N/A'));
     row.appendChild(el('span', 'detail', `${na.check.replace(/_/g, ' ')} — ${na.reason}`));
     log.appendChild(row);
@@ -660,13 +719,30 @@ function renderFooter() {
   const f = $('footer');
   f.replaceChildren();
   f.appendChild(el('div', null,
+    // The claim "there is no reset button because refresh is the reset" was true
+    // when written and stopped being true the moment Reset Certs and Reset the
+    // audit chain existed. A privacy footer that states something a visitor can
+    // see is false undermines the claims beside it that they cannot check.
     'Nothing is transmitted. No cookies, no localStorage, no analytics identifiers. '
-    + 'Keys are generated in this tab by Web Crypto and are gone on refresh — there is no reset button because refresh is the reset.'));
+    + 'Keys are generated in this tab by Web Crypto and never leave it. Reset Certs mints a '
+    + 'fresh chain and Reset the audit chain rebuilds the log; refreshing discards '
+    + 'everything, keys included.'));
   const line = el('div');
-  line.appendChild(document.createTextNode(`${DRAFT} · build ${VERSION} · `));
+  line.appendChild(document.createTextNode(`${DRAFT} · build ${VERSION} · © ${new Date().getUTCFullYear()} `));
   const a = el('a', null, 'PhalanxAI Security');
   a.href = 'https://phalanxaisec.com';
+  a.target = '_blank';
+  a.rel = 'noopener';
   line.appendChild(a);
+  line.appendChild(document.createTextNode(' · '));
+  // The licence is a link, not a word. The page's argument is that the
+  // validation logic is readable and worth reusing, and someone acting on that
+  // should not have to go and guess the terms.
+  const lic = el('a', null, 'Apache-2.0');
+  lic.href = 'https://github.com/tonyt68/a2a-trust-playground/blob/main/LICENSE';
+  lic.target = '_blank';
+  lic.rel = 'noopener';
+  line.appendChild(lic);
   f.appendChild(line);
   $('build-stamp').textContent = VERSION;
 }

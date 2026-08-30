@@ -76,14 +76,14 @@ implementation's `services/mcp_server/`:
 | # | Check | Clause | Module |
 |---|---|---|---|
 | 1 | Agent id format (strict UUID4) | hardening | [validate-input.js](src/validate-input.js) |
-| 2 | X.509 chain, certificate profile, validity, state | §6, §6.3, §10.4 | [x509.js](src/x509.js) |
+| 2 | X.509 chain, certificate profile, validity, state | §6, §6.1, §10.4 | [x509.js](src/x509.js) |
 | 3 | Revocation, disablement, TTL | §12 | [bounds.js](src/bounds.js) |
 | 4 | Dual-signature validation over the JCS canonical form | §9.3, §9.5, §9.6 | [policy.js](src/policy.js) |
 | 5 | Policy field guard — the §9.4 field set is complete | §9.4, §7.1 | [policy.js](src/policy.js) |
 | 6 | Required fields, version currency, content hash | §9.4, §9.6 | [policy.js](src/policy.js) |
 | 7 | Authorization bounds, spawn rule, template ceiling | §7, §7.2, §8.1 | [bounds.js](src/bounds.js) |
 | 8 | Scope containment, fail-closed | §8.3 | [bounds.js](src/bounds.js) |
-| 9 | Audit hash chain over the same canonical form | §9.5, §16.6 | [audit-chain.js](src/audit-chain.js) |
+| 9 | Audit hash chain over the same canonical form | §9.5, §16.7 | [audit-chain.js](src/audit-chain.js) |
 
 Any failure is a DENY carrying an error code and the governing clause. The
 `stages` array in the exported JSON *is* the decision log the UI renders, so the
@@ -150,10 +150,12 @@ guarantee had to move into an extension validators actually implement.
 
 ```bash
 pnpm install
-pnpm dev      # http://127.0.0.1:9100 — hot bundle, no build step
-pnpm test     # 472 unit tests
-pnpm e2e      # 162 assertions against the built file, offline
-pnpm build    # dist/a2a.html — one self-contained file
+pnpm dev             # http://127.0.0.1:9100 — hot bundle, no build step
+pnpm test            # 510 unit tests
+pnpm test:e2e        # builds, then 166 assertions against the built file, offline
+pnpm test:roundtrip  # 18 checks against the reference implementation and OpenSSL
+pnpm test:all        # all three
+pnpm build           # dist/a2a.html — one self-contained file
 ```
 
 `pnpm test` regenerates its certificate fixtures with OpenSSL first. Keys and
@@ -199,7 +201,7 @@ the saved file in a clean profile does.
 
 ## Testing
 
-472 unit tests and 162 end-to-end assertions. The two that matter most are **differential**:
+510 unit tests and 166 end-to-end assertions. The two that matter most are **differential**:
 
 - **Conformance to RFC 8785, not to another codebase.** The canonicalization
   oracle is the RFC, with Python used as an independent second implementation

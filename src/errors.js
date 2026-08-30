@@ -29,14 +29,14 @@ const SPECS = [
   // ── Stage 2 — X.509 identity (§6) and template state (§10.4)
   ['ERR_CHAIN_INVALID',        '6',    2, 'certificate does not verify to the CA'],
   ['ERR_FORGED_ISSUER',        '6',    2, 'issuer is not the trust anchor'],
-  ['ERR_SELF_SIGNED',          '6.1',  2, 'agent certificates must be CA-signed, never self-signed'],
+  ['ERR_SELF_SIGNED',          '6.2',  2, 'agent certificates must be CA-signed, never self-signed'],
   ['ERR_CERT_EXPIRED',         '6',    2, 'certificate is outside its validity window'],
-  ['ERR_KEY_TOO_SMALL',        '6',    2, 'RSA key is smaller than 2048 bits'],
+  ['ERR_KEY_TOO_SMALL',        '6.1',    2, 'RSA key is smaller than 2048 bits'],
   ['ERR_SUBJECT_MISMATCH',     '6',    2, 'certificate CN does not match agent_id'],
-  ['ERR_UNKNOWN_CRITICAL_EXT', '6',    2, 'certificate carries a critical extension this validator does not recognise'],
-  ['ERR_NAME_CONSTRAINT',      '6',    2, 'subject falls outside the issuing CA name constraints'],
-  ['ERR_BASIC_CONSTRAINTS',    '6',    2, 'basicConstraints absent, or asserts a role the certificate may not hold'],
-  ['ERR_WEAK_SIGNATURE',       '6',    2, 'certificate is signed with a digest weaker than SHA-256'],
+  ['ERR_UNKNOWN_CRITICAL_EXT', '6.1',    2, 'certificate carries a critical extension this validator does not recognise'],
+  ['ERR_NAME_CONSTRAINT',      '6.1',    2, 'subject falls outside the issuing CA name constraints'],
+  ['ERR_BASIC_CONSTRAINTS',    '6.1',    2, 'basicConstraints absent, or asserts a role the certificate may not hold'],
+  ['ERR_WEAK_SIGNATURE',       '6.1',    2, 'certificate is signed with a digest weaker than SHA-256'],
   ['ERR_AGENT_DISABLED',       '10.4', 2, 'agent state is not ACTIVE'],
 
   // ── Stage 3 — revocation and chain of custody (§12)
@@ -62,7 +62,7 @@ const SPECS = [
   ['ERR_ORG_MISMATCH',         '9.2',  4, 'policy OrgID does not match the template'],
   // §9.4 — stored with version, timestamp and content hash; all revalidated.
   ['ERR_POLICY_VERSION',       '9.4',  6, 'policy version is not current'],
-  ['ERR_CONTENT_HASH',         '9.4',  6, 'policy content hash does not match the document'],
+  ['ERR_CONTENT_HASH',         '9.6',  6, 'policy content hash does not match the document'],
 
   // ── Stage 7 — authorization bounds (§7, §8.1)
   ['ERR_BOUNDS_UNPARSEABLE',   '7',    7, 'authorization bounds absent or unparseable'],
@@ -74,7 +74,7 @@ const SPECS = [
   ['ERR_EMPTY_SCOPES',         '16.1', 8, 'an agent must declare the scopes it requests'],
 
   // ── Stage 9 — audit integrity (§16.6)
-  ['ERR_AUDIT_CHAIN_BROKEN',   '16.6', 9, 'audit hash chain is broken'],
+  ['ERR_AUDIT_CHAIN_BROKEN',   '16.7', 9, 'audit hash chain is broken'],
 
   // ── Fail-closed catch-all (§13)
   ['ERR_INTERNAL',             '13.1', 0, 'validation could not complete — failing closed'],

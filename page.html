@@ -29,6 +29,26 @@
   --bg:#f7f7f8; --panel-bg:#ffffff;
   --text:#1c1e21; --text-dim:#5b6169;
   --border:#d9dce1; --border-strong:#c2c7cf;
+  /* Polished steel rather than a soft gradient: dark shoulders, a hard white
+     specular band just above centre, and a second smaller glint below it. The
+     narrow stops are what read as reflection -- a smooth ramp reads as a tint. */
+  --chrome-fill:linear-gradient(178deg,
+    #6f7f8f 0%, #aebfcc 18%, #e8f2f8 40%, #ffffff 47%,
+    #cddbe6 52%, #7d8d9c 62%, #97a7b5 78%, #55636f 100%);
+  /* The bevel under the glyphs. Light above, dark below: the reverse of a
+     drop shadow, which is what makes an engraved edge read as raised metal. */
+  --chrome-lift:drop-shadow(0 1px 0 rgba(255,255,255,.35))
+                drop-shadow(0 -1px 0 rgba(0,0,0,.45))
+                drop-shadow(0 2px 3px rgba(0,0,0,.35));
+  --btn-sheen:rgba(255,255,255,.9); --btn-drop:rgba(0,0,0,.16);
+  /* The bevel is a variable so a colour variant can layer a tint OVER it
+     instead of replacing it. Setting `background:` in a variant silently
+     dropped the gradient, which is why 22 of 24 buttons rendered flat. */
+  --btn-bevel:linear-gradient(180deg,
+    color-mix(in srgb,var(--panel-bg) calc(100% - var(--btn-lift)),#fff var(--btn-lift)),
+    var(--panel-bg) 58%,
+    color-mix(in srgb,var(--panel-bg) 96%,#000 4%));
+  --btn-floor:rgba(0,0,0,.10); --btn-lift:8%;
 
   /* The editor stays a dark mono block inside the light page: it is terminal
      output, and reads as such. */
@@ -48,6 +68,11 @@
     --bg:#14161a; --panel-bg:#1b1e24;
     --text:#e8eaed; --text-dim:#9aa1ab;
     --border:#2c3038; --border-strong:#3a3f49;
+    /* The inset highlight is a light-mode value; on a dark surface it reads as
+       a glowing edge rather than a bevel. Dropped to a hairline and the drop
+       shadow deepened, since dark UIs get depth from shadow, not from sheen. */
+    --btn-sheen:rgba(255,255,255,.10); --btn-drop:rgba(0,0,0,.5);
+    --btn-floor:rgba(0,0,0,.4); --btn-lift:14%;
     --mono-bg:#0b0d11; --mono-text:#d9dee6; --mono-border:#232833;
   }
 }
@@ -72,7 +97,13 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
   gap:16px;flex-wrap:wrap}
 .brand-block{display:flex;align-items:center;gap:12px;min-width:0}
 #shield{flex:0 0 auto;display:block;border-radius:6px}
-.brand{font-size:15px;font-weight:700;letter-spacing:.02em;color:var(--text)}
+/* The wordmark carries the portfolio's chrome fill, same as the footer and the
+   panel headings. Defined once as --chrome-fill so the three sites cannot drift
+   apart -- they were three copies of the same gradient a moment ago. */
+.brand{font-size:19px;font-weight:800;letter-spacing:.055em;
+  background:var(--chrome-fill);-webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;color:transparent;
+  filter:var(--chrome-lift)}
 .brand-sub{font-size:11px;color:var(--text-dim);margin-top:3px}
 .head-right{display:flex;align-items:center;gap:16px;font-size:11px;flex-wrap:wrap}
 .head-right a{color:var(--accent);text-decoration:none;font-weight:600}
@@ -85,10 +116,36 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
 .dot.dim{background:var(--idle-line)}
 
 /* ── How-to strip — the entry point ─────────────────────────────────────── */
+/* This block is making CLAIMS about how real the certificates are, and that is
+   the load-bearing part of the page: a validator demonstrated on fake input
+   proves nothing. They were one flat grey sentence, which reads as
+   throat-clearing, so each now stands alone with a tick and enough size to be
+   read rather than skimmed past. */
 #howto{border-left:3px solid var(--accent);border-radius:0 6px 6px 0;
-  padding:10px 14px;background:color-mix(in srgb,var(--accent) 6%,var(--panel-bg));
-  font-size:12.5px;line-height:1.65;color:var(--text-dim)}
+  padding:14px 18px;background:color-mix(in srgb,var(--accent) 6%,var(--panel-bg));
+  font-size:13.5px;line-height:1.7;color:var(--text-dim)}
 #howto b{color:var(--text);font-weight:700}
+#howto .lead{font-size:17px;font-weight:800;letter-spacing:.01em;
+  color:var(--text);margin-bottom:10px}
+/* "Claims", not "features". The word invites the reader to check, which is the
+   posture of the whole page, and every line survives checking -- the note says
+   where. "Features" would ask for trust instead, which is the opposite pitch.
+   Also avoids colliding with the "Certificate properties" tab further down. */
+#howto .claims-head{font-size:11px;font-weight:800;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--text-dim);margin-bottom:7px;
+  padding-bottom:5px;border-bottom:1px solid var(--border)}
+#howto .claims-note{font-weight:400;letter-spacing:0;text-transform:none;
+  font-size:11px;opacity:.85;margin-left:8px}
+#howto .claims{display:flex;flex-wrap:wrap;gap:6px 22px;margin-bottom:11px}
+#howto .claim{font-weight:600;font-size:13px;color:var(--text)}
+#howto .claim::before{content:"\2713";color:var(--green-text);font-weight:800;
+  margin-right:6px}
+#howto .claim code{font-family:var(--font);font-size:12.5px;
+  color:var(--text);background:color-mix(in srgb,var(--text) 8%,transparent);
+  padding:1px 5px;border-radius:4px}
+#howto .howto-do{font-size:13px;line-height:1.7}
+#howto .ok-word{color:var(--green-text)}
+#howto .bad-word{color:var(--red-text)}
 
 /* Divider between the two control groups, so nineteen buttons stop reading as
    one undifferentiated grid. */
@@ -100,8 +157,8 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
   color:var(--text-dim)}
 .group-rule.ok{color:var(--green-text)}
 .admin-btn.ok{border-color:var(--green-line);color:var(--green-text);
-  background:color-mix(in srgb,var(--green-line) 8%,transparent)}
-.admin-btn.ok:hover:not(:disabled){background:color-mix(in srgb,var(--green-line) 18%,transparent)}
+  --btn-tint:color-mix(in srgb,var(--green-line) 8%,transparent)}
+.admin-btn.ok:hover:not(:disabled){--btn-tint:color-mix(in srgb,var(--green-line) 18%,transparent)}
 .admin-btn.ok .sec-tag{color:var(--green-text);opacity:.8}
 
 /* A lede under the section title, rather than a legend floating at the far
@@ -130,15 +187,23 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
 #ref-tabs{display:flex;justify-content:flex-start;gap:4px;flex-wrap:wrap;
   border-bottom:1px solid var(--border-strong);padding-bottom:0;margin-bottom:12px;
   text-transform:none;letter-spacing:0}
-.ref-tab{border:1px solid var(--border);border-bottom-color:transparent;
-  border-radius:6px 6px 0 0;
-  background:color-mix(in srgb,var(--idle-line) 10%,transparent);
-  color:var(--text-dim);font-family:var(--sans);font-size:11.5px;
-  font-weight:700;letter-spacing:.04em;padding:7px 13px;cursor:pointer;margin-bottom:-1px}
-.ref-tab:hover{color:var(--text);background:color-mix(in srgb,var(--accent) 10%,transparent);
-  border-color:var(--accent)}
-.ref-tab.active{border-color:var(--border-strong);border-bottom-color:var(--panel-bg);
-  background:var(--panel-bg);color:var(--text);
+/* Matched to .admin-btn rather than styled as tabs: everything else on the page
+   that you press shares one shape, and these were the only controls with their
+   own padding, corner radius, size and weight. Same geometry, same type; the
+   active state carries the difference instead of the silhouette. */
+.ref-tab{border:1px solid var(--border-strong);border-radius:6px;
+  --btn-tint:transparent;background-color:var(--panel-bg);
+  background-image:linear-gradient(var(--btn-tint),var(--btn-tint)),var(--btn-bevel);
+  box-shadow:0 2px 4px var(--btn-drop), 0 1px 0 var(--btn-drop),
+    inset 0 1px 0 var(--btn-sheen), inset 0 -1px 0 var(--btn-floor);
+  color:var(--text-dim);font-family:var(--sans);
+  font-size:12px;font-weight:600;letter-spacing:0;padding:9px 11px;
+  cursor:pointer;line-height:1.35;text-align:left;
+  transition:background .15s,border-color .15s,box-shadow .15s}
+.ref-tab:hover{color:var(--text);border-color:var(--accent);
+  --btn-tint:color-mix(in srgb,var(--accent) 8%,transparent)}
+.ref-tab.active{border-color:var(--accent);color:var(--text);
+  --btn-tint:color-mix(in srgb,var(--accent) 12%,transparent);font-weight:700}
   box-shadow:inset 0 2px 0 var(--accent)}
 .ref-tab .badge{font-family:var(--font);font-weight:400;font-size:10.5px;
   text-transform:none;letter-spacing:0;margin-left:6px}
@@ -153,6 +218,15 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
   border-bottom:1px solid var(--border);display:flex;justify-content:space-between;
   align-items:baseline;gap:12px}
 .panel-title .hint{font-weight:400;letter-spacing:0;text-transform:none;font-size:11px}
+/* Chrome fill on the panel headings, matching the portfolio's --chrome. Applied
+   to the first span only, not to .panel-title itself: the .hint beside it is
+   deliberately secondary, and clipping the whole element would flatten the two
+   into one weight. */
+.panel-title>span:first-child{font-size:14px;font-weight:800;letter-spacing:.075em;
+  background:var(--chrome-fill);
+  -webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;color:transparent;
+  filter:var(--chrome-lift)}
 
 /* ── Pipeline — status by tinted background, not glow ───────────────────── */
 #pipeline{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:0 0 10px;flex:0 0 auto}
@@ -225,11 +299,51 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
   background:var(--red-line);border-radius:2px}
 #doc{flex:1;min-width:0;min-height:0;padding:10px 12px;border:0;outline:0;resize:none;
   background:transparent;color:var(--mono-text);font-family:var(--font);
-  font-size:11.5px;line-height:1.55;white-space:pre;overflow:auto;tab-size:2}
+  font-size:11.5px;line-height:1.55;white-space:pre;tab-size:2;
+  overflow-x:auto;overflow-y:scroll;scrollbar-gutter:stable}
 #doc::selection{background:color-mix(in srgb,var(--accent) 45%,transparent);color:#fff}
 
 /* ── Decision log ───────────────────────────────────────────────────────── */
-#log{flex:1;overflow:auto;min-height:0}
+#log{flex:1;overflow-y:scroll;min-height:0;scrollbar-gutter:stable}
+
+/* Always-visible scrollbars on the regions that overflow.
+   macOS overlay scrollbars stay hidden until you are already scrolling, which
+   is exactly too late: the decision log runs 404px of content in a 342px box,
+   so two of eleven rows sat below the fold with nothing on screen suggesting
+   they existed. A validator that hides part of its own verdict is the wrong
+   thing to leave to a scroll gesture nobody knows to make.
+   Applied to every scrollable region, not just the log, so the affordance means
+   the same thing everywhere on the page. */
+/* Firefox only. `scrollbar-width` is deliberately NOT set: in current Chrome,
+   setting it disables the ::-webkit-scrollbar rules below entirely, and those
+   are what force a classic, space-occupying scrollbar instead of an overlay
+   that hides until you are already scrolling. */
+@supports (-moz-appearance:none){
+  #log, #doc, .audit-scroll, #ref-body{
+    scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
+}
+#log::-webkit-scrollbar, #doc::-webkit-scrollbar,
+.audit-scroll::-webkit-scrollbar, #ref-body::-webkit-scrollbar{
+  width:10px;height:10px}
+#log::-webkit-scrollbar-track, #doc::-webkit-scrollbar-track,
+.audit-scroll::-webkit-scrollbar-track, #ref-body::-webkit-scrollbar-track{
+  background:transparent}
+#log::-webkit-scrollbar-thumb, #doc::-webkit-scrollbar-thumb,
+.audit-scroll::-webkit-scrollbar-thumb, #ref-body::-webkit-scrollbar-thumb{
+  background:var(--border-strong);border-radius:6px;
+  border:2px solid var(--panel-bg)}
+#log::-webkit-scrollbar-thumb:hover, #doc::-webkit-scrollbar-thumb:hover,
+.audit-scroll::-webkit-scrollbar-thumb:hover, #ref-body::-webkit-scrollbar-thumb:hover{
+  background:var(--accent)}
+/* Where a horizontal and a vertical scrollbar meet. Unstyled it paints the
+   browser default -- a small white square, which is glaring in dark mode and
+   reads as a stray element rather than as chrome. The editor has both bars
+   because cert_pem is a single 12,000px line, so this corner always exists. */
+#log::-webkit-scrollbar-corner, #doc::-webkit-scrollbar-corner,
+.audit-scroll::-webkit-scrollbar-corner, #ref-body::-webkit-scrollbar-corner{
+  background:transparent}
+a.sec{text-decoration:none;border-bottom:1px dotted currentColor}
+a.sec:hover{color:var(--accent);border-bottom-style:solid}
 .log-row{display:grid;grid-template-columns:24px 50px 68px 1fr;gap:10px;
   align-items:baseline;padding:7px 8px;border-bottom:1px solid var(--border);
   font-size:12px}
@@ -251,12 +365,28 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
   gap:6px;margin-bottom:10px;flex:0 0 auto}
 #controls-validate{margin-bottom:10px;flex:0 0 auto}
 #controls-validate .admin-btn{width:100%;text-align:center;font-size:13px;padding:11px}
+/* Depth, in the portfolio's language: a vertical gradient lighter at the top,
+   a hairline inset highlight on the top edge, and a small drop shadow. Built
+   from color-mix over the theme tokens rather than the portfolio's literal
+   hex values, so the same rule lifts a white button in light mode and a dark
+   one in dark mode instead of only working in one. */
 .admin-btn{padding:9px 11px;border:1px solid var(--border-strong);border-radius:6px;
-  background:var(--panel-bg);color:var(--text);font-family:var(--sans);font-size:12px;
+  --btn-tint:transparent;background-color:var(--panel-bg);
+  background-image:linear-gradient(var(--btn-tint),var(--btn-tint)),var(--btn-bevel);
+  box-shadow:0 2px 4px var(--btn-drop), 0 1px 0 var(--btn-drop),
+    inset 0 1px 0 var(--btn-sheen), inset 0 -1px 0 var(--btn-floor);
+  color:var(--text);font-family:var(--sans);font-size:12px;
   font-weight:600;cursor:pointer;text-align:left;line-height:1.35;
-  transition:background .15s,border-color .15s}
+  transition:background .15s,border-color .15s,box-shadow .15s,transform .06s}
+/* Pressing it should feel like pressing it: the lift collapses rather than the
+   colour merely changing. */
+.admin-btn:active:not(:disabled){transform:translateY(2px);
+  box-shadow:inset 0 2px 4px var(--btn-floor), inset 0 -1px 0 var(--btn-sheen)}
+/* Tabs press too -- they are the same control now, so they get the same feel. */
+.ref-tab:active{transform:translateY(2px);
+  box-shadow:inset 0 2px 4px var(--btn-floor), inset 0 -1px 0 var(--btn-sheen)}
 .admin-btn:hover:not(:disabled){border-color:var(--accent);
-  background:color-mix(in srgb,var(--accent) 8%,transparent)}
+  --btn-tint:color-mix(in srgb,var(--accent) 8%,transparent)}
 .admin-btn:disabled{opacity:.5;cursor:progress}
 .admin-btn .sec-tag{color:var(--text-dim);font-size:10.5px;font-weight:400;
   font-family:var(--font)}
@@ -265,11 +395,11 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
   background:color-mix(in srgb,var(--green-line) 16%,transparent);color:var(--green-text)}
 .admin-btn.copied .sec-tag{color:var(--green-text)}
 .admin-btn.primary{border-color:var(--green-line);color:var(--green-text);
-  background:color-mix(in srgb,var(--green-line) 10%,transparent)}
-.admin-btn.primary:hover:not(:disabled){background:color-mix(in srgb,var(--green-line) 20%,transparent)}
+  --btn-tint:color-mix(in srgb,var(--green-line) 10%,transparent)}
+.admin-btn.primary:hover:not(:disabled){--btn-tint:color-mix(in srgb,var(--green-line) 20%,transparent)}
 .admin-btn.danger{border-color:var(--red-line);color:var(--red-text);
-  background:color-mix(in srgb,var(--red-line) 8%,transparent)}
-.admin-btn.danger:hover:not(:disabled){background:color-mix(in srgb,var(--red-line) 18%,transparent)}
+  --btn-tint:color-mix(in srgb,var(--red-line) 8%,transparent)}
+.admin-btn.danger:hover:not(:disabled){--btn-tint:color-mix(in srgb,var(--red-line) 18%,transparent)}
 .admin-btn.danger .sec-tag{color:var(--red-text);opacity:.75}
 
 /* ── Inert-by-construction panel ────────────────────────────────────────── */
@@ -318,13 +448,18 @@ table.report tr.bad .role,table.report tr.bad .id{color:var(--red-text)}
 .acct-card.bad .cn{color:var(--red-text)}
 
 /* ── Audit strip ────────────────────────────────────────────────────────── */
-.audit-strip{display:flex;align-items:center;gap:10px;padding:10px 14px;
-  border:1px solid var(--border);border-radius:8px;background:var(--panel-bg);
-  font-size:12px;font-family:var(--font)}
-.audit-strip.valid{color:var(--green-text);border-color:var(--green-line);
-  background:color-mix(in srgb,var(--green-line) 10%,transparent)}
-.audit-strip.broken{color:var(--red-text);border-color:var(--red-line);
-  background:color-mix(in srgb,var(--red-line) 14%,transparent)}
+/* A status line, not a control. It sat directly beneath a row of real tabs with
+   the same border, radius and padding, so it read as another one -- an
+   affordance the element does not have. A full-bleed bar with a single accent
+   rule on the left says "this is telling you something" rather than "press me".
+   The colour still carries the verdict; only the silhouette changed. */
+.audit-strip{display:flex;align-items:center;gap:10px;padding:9px 14px;
+  border:0;border-left:3px solid var(--border);border-radius:0;
+  background:var(--panel-bg);font-size:12px;font-family:var(--font)}
+.audit-strip.valid{color:var(--green-text);border-left-color:var(--green-line);
+  background:color-mix(in srgb,var(--green-line) 8%,transparent)}
+.audit-strip.broken{color:var(--red-text);border-left-color:var(--red-line);
+  background:color-mix(in srgb,var(--red-line) 12%,transparent)}
 
 /* Audit entries, one row each. */
 .audit-list{margin-top:10px;font-family:var(--font);font-size:11px}
@@ -357,9 +492,18 @@ table.report tr.bad .role,table.report tr.bad .id{color:var(--red-text)}
 /* ── Stated limits / footer ─────────────────────────────────────────────── */
 .limits{font-size:11.5px;color:var(--text-dim);line-height:1.85}
 .limits b{color:var(--text);font-weight:600}
-footer{font-size:11px;color:var(--text-dim);text-align:center;padding:14px 0;
-  border-top:1px solid var(--border);line-height:1.8}
-footer a{color:var(--accent);text-decoration:none;font-weight:600}
+/* The chrome fill from the portfolio (index.html --chrome), so the footer reads
+   as the same brand rather than as chrome text sitting next to a plain page.
+   It is a gradient clipped to the glyphs, not a typeface. */
+footer{font-size:12.5px;text-align:center;padding:16px 0;
+  border-top:1px solid var(--border);line-height:1.85;
+  background:var(--chrome-fill);
+  -webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;color:transparent}
+/* The link needs its own fill: it inherits the clipped background otherwise and
+   the accent colour never shows, leaving it indistinguishable from body text. */
+footer a{-webkit-text-fill-color:var(--accent);color:var(--accent);
+  text-decoration:none;font-weight:600}
 </style>
 </head>
 <body>
@@ -393,10 +537,32 @@ footer a{color:var(--accent);text-decoration:none;font-weight:600}
   </header>
 
   <!-- One line, not a lecture. The panes below carry the rest. -->
-  <p id="howto"><b>A trust chain was just minted in your browser</b> — real RSA keys,
-    real X.509, nothing transmitted. <b>Edit</b> it on the left or use a modify button
-    below, then <b>Validate</b> to re-run all nine checks. Green changes stay valid;
-    red ones are refused and name the clause of the draft that refused them.</p>
+  <!-- Every claim below is verified by a test in this repository, not asserted.
+       The certificates are the point: a validator demonstrated on fake input
+       proves nothing, so this says exactly how real they are. -->
+  <div id="howto">
+    <div class="lead">A real trust chain was just minted in your browser.</div>
+    <div class="claims-head">Certificate claims
+      <span class="claims-note">each one is checked by a test in this repository</span>
+    </div>
+    <div class="claims">
+      <span class="claim">Five certificates &mdash; a CA, two agents, two signing authorities</span>
+      <span class="claim">RSA-2048 keypairs, generated in this tab by Web&nbsp;Crypto</span>
+      <span class="claim">Signed <code>RSASSA-PKCS1-v1_5</code> with SHA-256</span>
+      <span class="claim">Real X.509 &mdash; <code>openssl verify</code> returns OK</span>
+      <span class="claim">RFC&nbsp;5280 profile &mdash; <code>cA:FALSE</code>, <code>keyCertSign</code> on the CA</span>
+      <span class="claim">Name-constrained &mdash; this CA cannot issue for a real hostname</span>
+      <span class="claim">Agent identity is carried in the certificate subject</span>
+      <span class="claim">Owner and Policy Authority each hold their own CA-issued certificate</span>
+      <span class="claim">24-hour validity window, and expiry is enforced</span>
+      <span class="claim">The CA is self-signed and in nobody&rsquo;s trust store</span>
+    </div>
+    <div class="howto-do"><b>Edit</b> the document on the left or press a modify button
+      below, then <b>Validate</b> to re-run all nine checks.
+      <b class="ok-word">Green</b> changes stay valid.
+      <b class="bad-word">Red</b> ones are refused, and name the clause of the draft that
+      refused them.</div>
+  </div>
 
   <div id="verdict" class="idle">
     <span class="b-corner tl">&#9700;</span><span class="b-corner tr">&#9701;</span>
