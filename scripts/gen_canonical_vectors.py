@@ -10,7 +10,7 @@ specified no canonicalization and the only available ground truth was one
 codebase's behaviour. That is a circular oracle: it proves the browser agrees
 with a particular Python program, not that either agrees with a specification.
 
-`-02` §9.5 normatively specifies JCS (RFC 8785), so the ground truth is now the
+`-03` §3 and §11.5 normatively specify JCS (RFC 8785), so the ground truth is now the
 RFC. Two independent sources are used, and the distinction between them matters:
 
   1. NORMATIVE vectors, transcribed from RFC 8785 itself. These are the
@@ -83,40 +83,54 @@ NORMATIVE = [
 # oracle; the point is that a serializer written in another language, by other
 # people, produces the same bytes.
 DIFFERENTIAL = [
-    ("identity fields of an agent", {
-        "agent_id": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
-        "agent_uuid": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
-        "subject": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
-        "org_id": "playground-org",
-        "issuer": "A2A-Trust-Playground-CA",
-        "owner": "owner@example.com",
-        "template_version": "1.0",
-        "can_spawn": [],
-        "max_children": 0,
-    }),
-    ("a complete -02 policy document", {
+        ("a complete -03 policy document (§11.4)", {
         "subject": "c669186f-a84b-4d7a-81f3-05880df87114",
-        "owner": "owner@example.com",
+        "owner": "owner-authority",
         "org_id": "playground-org",
         "scopes": ["read:events"],
         "version": 2,
-        "issued_at": "2026-08-28T00:00:00.000Z",
+        "issued_at": "2026-09-03T00:00:00.000Z",
     }),
     ("a policy carrying the optional fields", {
         "subject": "c669186f-a84b-4d7a-81f3-05880df87114",
-        "owner": "owner@example.com",
+        "owner": "owner-authority",
         "org_id": "playground-org",
         "scopes": ["read:events", "write:events"],
         "spawn_targets": ["8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa"],
         "version": 7,
-        "issued_at": "2026-08-28T00:00:00.000Z",
-        "not_after": "2026-08-29T00:00:00.000Z",
+        "issued_at": "2026-09-03T00:00:00.000Z",
+        "not_after": "2026-09-04T00:00:00.000Z",
+    }),
+    ("an Agent Template extension body (§8.2 Table 5)", {
+        "subject": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
+        "owner": "owner-authority",
+        "org_id": "playground-org",
+        "permitted_operations": ["spawn", "read"],
+        "allowed_scopes": ["read:events", "write:events"],
+        "can_spawn": ["c669186f-a84b-4d7a-81f3-05880df87114"],
+        "max_children": 2,
+        "policy_ref": "policy-store/8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa/current",
+        "ttl_seconds": 86400,
+    }),
+    ("an Agent Spawn extension body (§10.5 Table 6)", {
+        "parent_agent_id": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
+        "spawned_at": "2026-09-03T00:00:00Z",
+        "spawn_nonce": "AAAAAAAAAAAAAAAAAAAAAA==",
+    }),
+    ("a cross-organizational grant body (§13.2 Table 10)", {
+        "grantor": "partner-org",
+        "grantee": "playground-org",
+        "template": "c669186f-a84b-4d7a-81f3-05880df87114",
+        "allowed_scopes": ["read:events"],
+        "issued_at": "2026-09-03T00:00:00.000Z",
+        "ttl_seconds": 3600,
+        "max_spawns": 3,
     }),
     ("an audit chain entry", {
         "index": 0,
         "previous_hash": "0" * 64,
         "decision": "ALLOWED",
-        "timestamp": "2026-08-28T00:00:00.000Z",
+        "timestamp": "2026-09-03T00:00:00.000Z",
     }),
     ("unicode in ordinary values", {"owner": "José", "note": "naïve café"}),
     ("keys needing escapes", {'a"b': 1, "c\\d": 2, "e\tf": 3}),

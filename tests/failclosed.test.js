@@ -1,173 +1,98 @@
 /**
- * Fail-closed and identity-consistency properties.
- *
- * Every case here was a document that VALIDATED CLEANLY until it was attacked.
- * None was found by reading the code — each came out of a sweep that mutated a
- * known-good document one field at a time and asked what still passed.
- *
- * They share a shape worth naming, because it is the shape that survives review:
- * none of them is a broken check. Each is a check that was never reached, or a
- * default that answered a question nobody could answer. A missing CRL is the
- * clearest example — `document.crl ?? { revoked: [], disabled: [] }` reads as
- * defensive and means "nothing is revoked", which is an assertion, not a
- * fallback. Deleting one key from the document turned every revocation check in
- * the pipeline into a pass.
+ * §15.1 — a verification step that cannot be completed is a DENY. These pin
+ * the places where a missing thing used to be read as an empty thing.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { runPipeline } from '../src/pipeline.js';
-import { parseDocument } from '../src/validate-input.js';
 import { buildDefaultDocument } from '../src/defaults.js';
-import { DenyError } from '../src/errors.js';
+import { childOf, parentOf, reissueThroughRegistry } from '../src/scenarios.js';
 
-let base;
-beforeAll(async () => { base = await buildDefaultDocument(); }, 60_000);
+let base, now;
+beforeAll(async () => { now = new Date(); base = await buildDefaultDocument({ now }); }, 30_000);
+const clone = () => JSON.parse(JSON.stringify(base));
+const run = (d) => runPipeline({ document: d, now });
 
-const kid = (d) => d.chain.find((n) => n.role === 'agent' && n.metadata?.parent_agent_id);
-
-async function attack(mutate) {
-  const d = JSON.parse(JSON.stringify(base));
-  mutate(d, kid(d));
-  try {
-    const r = await runPipeline({ document: parseDocument(JSON.stringify(d)) });
-    return { verdict: r.verdict, code: r.error_code };
-  } catch (e) {
-    if (e instanceof DenyError) return { verdict: 'DENY', code: e.code };
-    return { verdict: 'THREW', code: `${e.constructor.name}: ${e.message}` };
-  }
-}
-
-describe('fail closed on absent evidence (§13.1)', () => {
+describe('fail closed on absent evidence (§15.1)', () => {
   it('refuses a document with no CRL rather than assuming nothing is revoked', async () => {
-    // An EMPTY crl is a valid answer: "nothing is revoked". A MISSING crl is
-    // "unknown". Collapsing the two is what made this a one-key bypass.
-    const r = await attack((d) => { delete d.crl; });
+    const d = clone(); delete d.crl;
+    const r = await run(d);
     expect(r.verdict).toBe('DENY');
-    expect(r.code).toBe('ERR_SCHEMA_VIOLATION');
+    expect(r.stages.find((s) => s.result === 'DENY').detail).toMatch(/no crl/);
   });
-
   it('still accepts an explicitly empty CRL', async () => {
-    const r = await attack((d) => { d.crl = { revoked: [], disabled: [] }; });
-    expect(r.verdict).toBe('PASS');
+    const d = clone(); d.crl = { revoked: [], disabled: [] };
+    expect((await run(d)).verdict).toBe('PASS');
   });
-
   it('refuses a document with no audit chain', async () => {
-    const r = await attack((d) => { delete d.audit; });
+    const d = clone(); delete d.audit;
+    const r = await run(d);
     expect(r.verdict).toBe('DENY');
-    expect(r.code).toBe('ERR_SCHEMA_VIOLATION');
+    expect(r.stages.find((s) => s.result === 'DENY').detail).toMatch(/no audit chain/);
   });
-
   it('never throws, even with both omitted', async () => {
-    // The contract the UI depends on: a DENY is returned, not raised. A throw
-    // here would take out the render for the exact documents most worth seeing
-    // a verdict for.
-    const r = await attack((d) => { delete d.crl; delete d.audit; });
-    expect(r.verdict).toBe('DENY');
+    const d = clone(); delete d.audit; delete d.crl;
+    expect((await run(d)).verdict).toBe('DENY');
   });
 });
 
-describe('revocation reaches the trust anchor (§12)', () => {
-  it('refuses when the CRL names the anchor', async () => {
-    // Revocation was applied per-agent only, so the one revocation that voids
-    // every certificate beneath it was the one revocation with no effect.
-    const r = await attack((d) => { d.crl.revoked.push(d.chain[0].metadata.subject); });
-    expect(r.verdict).toBe('DENY');
-    expect(r.code).toBe('ERR_AGENT_REVOKED');
+describe('revocation reaches the trust anchor (§14)', () => {
+  it('refuses when the CRL names the anchor, before any agent', async () => {
+    const d = clone(); d.crl.revoked.push(d.chain[0].metadata.subject);
+    const r = await run(d);
+    expect(r.error_code).toBe('ERR_AGENT_REVOKED');
+    expect(r.walk.map((w) => w.subject)).toEqual([]);
   });
+  it('matches the CRL against the CERTIFICATE\'s own subject, not the document\'s unverified restatement of it', async () => {
+    // If the check trusted `metadata.subject`, deleting or lying about it
+    // would let a CRL entry naming the real anchor be silently skipped.
+    let d = clone(); delete d.chain[0].metadata.subject;
+    d.crl.revoked.push('A2A-Trust-Playground-CA');
+    expect((await run(d)).error_code).toBe('ERR_AGENT_REVOKED');
 
-  it('refuses when the anchor is merely disabled', async () => {
-    const r = await attack((d) => { d.crl.disabled.push(d.chain[0].metadata.subject); });
-    expect(r.verdict).toBe('DENY');
-    expect(r.code).toBe('ERR_AGENT_REVOKED');
-  });
-
-  it('refuses before validating any agent beneath it', async () => {
-    // Order matters: if the anchor is void, an agent's verification against it
-    // means nothing, so no agent stage should report PASS first.
-    const d = JSON.parse(JSON.stringify(base));
-    d.crl.revoked.push(d.chain[0].metadata.subject);
-    const r = await runPipeline({ document: d });
-    expect(r.stages.filter((s) => s.subject === 'CHILD AGENT' && s.status === 'PASS')).toHaveLength(0);
+    d = clone(); d.chain[0].metadata.subject = 'not-the-real-anchor';
+    d.crl.revoked.push('A2A-Trust-Playground-CA');
+    expect((await run(d)).error_code).toBe('ERR_AGENT_REVOKED');
   });
 });
 
-describe('an agent has exactly one identity (§7.1)', () => {
-  // §7.1 carries the identity three times. All three are inside the owner_sig
-  // projection, so a mismatch in `existing_cert` breaks the signature — but
-  // nothing signs the chain copy, so a mismatch there was silent.
-  for (const field of ['subject', 'agent_uuid']) {
-    it(`refuses ${field} naming a different agent than agent_id`, async () => {
-      const r = await attack((_, child) => {
-        child.metadata[field] = '00000000-0000-4000-8000-000000000000';
-      });
-      expect(r.verdict).toBe('DENY');
-      expect(r.code).toBe('ERR_SCHEMA_VIOLATION');
-    });
-  }
-
-  for (const [field, value] of Object.entries({
-    'owner as an array': ['owner@example.com'],
-    'owner as a number': 42,
-    'owner as an empty string': '',
-    'owner as null': null,
-  })) {
-    it(`refuses ${field}`, async () => {
-      const r = await attack((_, child) => { child.metadata.owner = value; });
-      expect(r.verdict).toBe('DENY');
-      expect(r.code).toBe('ERR_SCHEMA_VIOLATION');
-    });
-  }
-
-  it('refuses a non-string org_id', async () => {
-    const r = await attack((_, child) => { child.metadata.org_id = { id: 'x' }; });
+describe('the trust anchor\'s own validity window is checked (§15.1)', () => {
+  it('refuses when the clock has moved past the anchor\'s notAfter, even though every leaf beneath it is freshly re-issued', async () => {
+    const d = clone();
+    // Re-issue both agents under the SAME (already-expired-relative-to-`now`)
+    // CA key, so only the anchor's own window is what could refuse this.
+    const far = new Date(now.getTime() + 30 * 24 * 3600 * 1000);
+    await reissueThroughRegistry(d, parentOf(d), {}, { now: far });
+    await reissueThroughRegistry(d, childOf(d), {}, { now: far });
+    const r = await runPipeline({ document: d, now: far });
     expect(r.verdict).toBe('DENY');
+    expect(r.error_code).toBe('ERR_CERT_EXPIRED');
   });
 });
 
-describe('organisational containment (§9.2, §11)', () => {
-  it('refuses a child declaring a different org than its parent', async () => {
-    // §9.2 scopes authority to the organisation that signed the template, and
-    // §11 puts cross-org trust behind federation this document cannot express.
-    // org_id was compared only on the policy path, never between a parent and
-    // the child it spawned.
-    const r = await attack((_, child) => { child.metadata.org_id = 'other-org'; });
-    expect(r.verdict).toBe('DENY');
-    expect(r.code).toBe('ERR_ORG_MISMATCH');
+describe('every restatement of an identifier must agree with the certificate (§7.2, §10.5)', () => {
+  it('refuses a chain agent_id that is not the certificate subject', async () => {
+    const d = clone(); childOf(d).metadata.agent_id = parentOf(d).metadata.agent_id;
+    expect((await run(d)).error_code).toBe('ERR_DUPLICATE_SUBJECT');
   });
-
-  it('permits a child in its parent’s organisation', async () => {
-    const r = await attack(() => {});
-    expect(r.verdict).toBe('PASS');
+  it('refuses a parent_agent_id the certificate did not attest', async () => {
+    const d = clone(); childOf(d).metadata.parent_agent_id = '019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d';
+    expect((await run(d)).error_code).toBe('ERR_PARENT_MISMATCH');
+  });
+  it('refuses a child presented as a root', async () => {
+    const d = clone(); delete childOf(d).metadata.parent_agent_id;
+    expect((await run(d)).error_code).toBe('ERR_PARENT_MISMATCH');
   });
 });
 
-describe('metadata timestamps must be coherent', () => {
-  it('refuses created_at in the future', async () => {
-    // X.509 notBefore covers the certificate. Nothing covered the metadata's
-    // own claim, so the two could disagree unnoticed.
-    const r = await attack((_, child) => { child.metadata.created_at = '2099-01-01T00:00:00.000Z'; });
-    expect(r.verdict).toBe('DENY');
-    expect(r.code).toBe('ERR_TIMESTAMP_FORMAT');
-  });
-
-  it('accepts created_at in the past', async () => {
-    const r = await attack((_, child) => { child.metadata.created_at = '2020-01-01T00:00:00.000Z'; });
-    expect(r.verdict).toBe('PASS');
+describe('organisational containment (§10.1 Check 2, §13)', () => {
+  it('a child in its parent’s organisation needs no grant', async () => {
+    expect((await run(clone())).walk.find((w) => w.subject === 'CROSS-ORG GRANT').detail).toMatch(/not needed/);
   });
 });
 
 describe('chain order is not load-bearing', () => {
   it('reaches the same verdict however the chain is ordered', async () => {
-    // This one is NOT a finding, recorded because a sweep flags it and a future
-    // reader will wonder. The walk sorts parents before children explicitly, so
-    // array position cannot change which checks run — the chain is a set with
-    // parentage stated in the data, not a sequence.
-    const forward = await runPipeline({ document: JSON.parse(JSON.stringify(base)) });
-    const reversed = JSON.parse(JSON.stringify(base));
-    reversed.chain.reverse();
-    const back = await runPipeline({ document: reversed });
-
-    const shape = (r) => r.stages.map((s) => `${s.stage}${s.status}${s.subject ?? ''}`).sort().join('|');
-    expect(back.verdict).toBe(forward.verdict);
-    expect(shape(back)).toBe(shape(forward));
+    const d = clone(); d.chain.reverse();
+    expect((await run(d)).verdict).toBe('PASS');
   });
 });

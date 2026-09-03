@@ -1,132 +1,185 @@
 /**
- * RSA-SHA256 signing and verification over canonical JSON (§9.3).
+ * Envelope signatures — §3.1.
  *
- * This is the interoperability seam. `policy_validator.py` verifies by shelling
- * out to OpenSSL:
+ * Every signature and the content hash are computed over ONE octet string: the
+ * JCS serialization of `body`, and nothing else. The algorithm is not carried in
+ * the envelope; it is fixed by the type of the signer's public key, read from a
+ * certificate the relying party has already validated:
  *
- *     openssl x509 -in cert.crt -pubkey -noout > pub.pem
- *     openssl dgst -sha256 -verify pub.pem -signature sig.bin data.dat
+ *   RSA, 3072+   RSASSA-PSS, SHA-256, MGF1-SHA-256, salt 32   PSS octets
+ *   EC P-256     ECDSA with SHA-256                           r‖s, 64 octets
+ *   EC P-384     ECDSA with SHA-384                           r‖s, 96 octets
+ *   Ed25519      Ed25519 (PureEdDSA)                          64 octets
  *
- * `openssl dgst -sha256 -sign` produces a PKCS#1 v1.5 signature over a SHA-256
- * digest. The Web Crypto equivalent is exactly `RSASSA-PKCS1-v1_5` with
- * `SHA-256` — not RSA-PSS, which is also RSA-with-SHA-256 and is what a reader
- * skimming for "modern" would reach for. PSS is randomised and produces a
- * different signature every time; OpenSSL's `dgst -verify` would reject it and
- * the failure would look like a key mismatch rather than an algorithm mismatch.
+ * A signature under any other key type, or in any other encoding, is refused
+ * rather than skipped — a relying party that does not recognise a key type
+ * refuses (§19.9), which is the fail-closed outcome.
  *
- * ── What is actually signed ────────────────────────────────────────────────
+ * ── Two things the previous design got the other way round ─────────────────
  *
- * Not the metadata document. A FILTERED SUBSET of it, serialised canonically:
+ * It used RSASSA-PKCS1-v1_5 because that is what `openssl dgst -sign` produces
+ * and the round-trip proof compared signature octets. §3.1 chooses PSS, which
+ * is randomized: the same key and body sign to different octets every time. So
+ * a test vector VERIFIES a signature and never byte-compares it, and the
+ * one-key-two-roles rule compares public keys, not signature octets — equal
+ * signatures would never be observed even when one key holds both roles.
  *
- *     owner_sig = RSA-SHA256( canonicalize( identity fields of the cert ) )
- *     pa_sig    = RSA-SHA256( canonicalize( policy fields of the update  ) )
- *
- * Two signatures over two disjoint-but-for-`owner` field sets, by two different
- * keys. That is the whole mechanism of §9.3: the Owner attests that identity has
- * not moved, the Policy Authority authorises the policy change, and neither can
- * do the other's job. Signing the whole document with one key would be a
- * different, weaker scheme that happens to also involve RSA.
- *
- * Every byte of the signed input comes from `canonical.js`. If that module and
- * Python's `json.dumps` disagree by one character, every signature here fails
- * verification and looks like a crypto bug. It is not; it is a serialisation
- * bug, which is why canonicalisation was built and proven first.
+ * Web Crypto's ECDSA output is already the fixed-width r‖s concatenation the
+ * draft requires, not DER. That is the one place the platform's default and the
+ * specification agree without conversion, and it is checked by length rather
+ * than assumed.
  */
 
+import * as asn1js from 'asn1js';
+import { PrivateKeyInfo } from 'pkijs';
 import { canonicalize } from './canonical.js';
-import { parseCertificate } from './x509.js';
-import { validatePem } from './validate-input.js';
+import { parseCertificate, publicKeyInfo, MIN_RSA_BITS, OID } from './x509.js';
+import { validatePem, decodeBase64Strict } from './validate-input.js';
 import { DenyError } from './errors.js';
-
-/** Matches `openssl dgst -sha256 -sign`. */
-const ALGORITHM = Object.freeze({ name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' });
+import { bytesToHex, bytesToBase64 } from './encoding.js';
 
 const encoder = new TextEncoder();
 
-/** Base64 -> bytes, strictly. A signature that is not valid base64 is a DENY, not a retry. */
-function decodeBase64(b64, field) {
-  if (typeof b64 !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64) || b64.length % 4 !== 0) {
-    throw new DenyError('ERR_SCHEMA_VIOLATION', `${field} is not valid base64`);
-  }
-  try {
-    return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-  } catch {
-    throw new DenyError('ERR_SCHEMA_VIOLATION', `${field} could not be decoded`);
-  }
-}
+/** §3.1 Table 2, as Web Crypto parameters. */
+const SUITES = Object.freeze({
+  'RSA':     { importAlg: { name: 'RSA-PSS', hash: 'SHA-256' }, signAlg: { name: 'RSA-PSS', saltLength: 32 }, label: 'RSASSA-PSS with SHA-256' },
+  'P-256':   { importAlg: { name: 'ECDSA', namedCurve: 'P-256' }, signAlg: { name: 'ECDSA', hash: 'SHA-256' }, length: 64, label: 'ECDSA with SHA-256, r‖s' },
+  'P-384':   { importAlg: { name: 'ECDSA', namedCurve: 'P-384' }, signAlg: { name: 'ECDSA', hash: 'SHA-384' }, length: 96, label: 'ECDSA with SHA-384, r‖s' },
+  'Ed25519': { importAlg: { name: 'Ed25519' }, signAlg: { name: 'Ed25519' }, length: 64, label: 'Ed25519' },
+});
 
-function encodeBase64(bytes) {
-  let s = '';
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s);
+/** Which suite a CryptoKey belongs to, from the key's own algorithm. */
+export function suiteForKey(key) {
+  const a = key?.algorithm ?? {};
+  if (a.name === 'RSA-PSS') {
+    if ((a.modulusLength ?? 0) < MIN_RSA_BITS) {
+      throw new DenyError('ERR_SIGNATURE_ALGORITHM', `RSA-${a.modulusLength} is below the ${MIN_RSA_BITS}-bit floor`);
+    }
+    return { type: 'RSA', ...SUITES.RSA, length: a.modulusLength / 8 };
+  }
+  if (a.name === 'ECDSA' && a.namedCurve === 'P-256') return { type: 'P-256', ...SUITES['P-256'] };
+  if (a.name === 'ECDSA' && a.namedCurve === 'P-384') return { type: 'P-384', ...SUITES['P-384'] };
+  if (a.name === 'Ed25519') return { type: 'Ed25519', ...SUITES.Ed25519 };
+  throw new DenyError('ERR_SIGNATURE_ALGORITHM', `no signature algorithm is assigned to a ${a.name ?? 'unknown'} key`);
 }
 
 /**
- * The public key from a certificate, ready to verify with.
- *
- * PKI.js's `getPublicKey` is used rather than reaching into the SPKI bytes: it
- * applies the algorithm parameters the certificate declares, which is the same
- * thing `openssl x509 -pubkey` does before handing the key to `dgst -verify`.
+ * The public key from a certificate, imported under the suite its type
+ * dictates. The certificate is expected to have been validated to a trust
+ * anchor already (§9.2) — this only reads the key.
  */
 export async function publicKeyFromCertificate(certPem) {
   const cert = parseCertificate(certPem);
+  const info = publicKeyInfo(cert);
+  const type = info.type === 'EC' ? info.curve : info.type;
+  const suite = SUITES[type];
+  if (!suite) {
+    throw new DenyError('ERR_SIGNATURE_ALGORITHM',
+      `no signature algorithm is assigned to the signer's key type (${info.type ?? 'unknown'})`);
+  }
+  if (type === 'RSA' && info.bits < MIN_RSA_BITS) {
+    throw new DenyError('ERR_SIGNATURE_ALGORITHM', `RSA-${info.bits} is below the ${MIN_RSA_BITS}-bit floor`);
+  }
+  const spki = cert.subjectPublicKeyInfo.toSchema().toBER(false);
   try {
-    return await cert.getPublicKey({ algorithm: { algorithm: ALGORITHM, usages: ['verify'] } });
+    return await crypto.subtle.importKey('spki', spki, suite.importAlg, false, ['verify']);
   } catch {
-    throw new DenyError('ERR_CHAIN_INVALID', 'certificate public key could not be imported');
+    throw new DenyError('ERR_SIGNATURE_ALGORITHM', 'the signer public key could not be imported for its assigned algorithm');
   }
 }
 
-/** Import a PKCS#8 private key. Only the playground's own generated keys reach this. */
+/**
+ * Import a PKCS#8 private key under the suite its algorithm identifier
+ * dictates. Only the playground's own generated keys reach this.
+ */
 export async function privateKeyFromPem(keyPem) {
   const { der } = validatePem(keyPem, 'PRIVATE KEY');
+  let alg;
   try {
-    return await crypto.subtle.importKey('pkcs8', der, ALGORITHM, false, ['sign']);
+    const asn1 = asn1js.fromBER(der.buffer.slice(der.byteOffset, der.byteOffset + der.byteLength));
+    if (asn1.offset === -1) throw new Error('bad BER');
+    const info = new PrivateKeyInfo({ schema: asn1.result });
+    const id = info.privateKeyAlgorithm.algorithmId;
+    if (id === OID.rsaEncryption) alg = SUITES.RSA.importAlg;
+    else if (id === OID.ed25519) alg = SUITES.Ed25519.importAlg;
+    else if (id === OID.ecPublicKey) {
+      const curve = String(info.privateKeyAlgorithm.algorithmParams?.valueBlock?.toString() ?? '');
+      alg = curve === OID.p256 ? SUITES['P-256'].importAlg
+        : curve === OID.p384 ? SUITES['P-384'].importAlg : null;
+    }
   } catch {
+    alg = null;
+  }
+  if (!alg) throw new DenyError('ERR_MALFORMED_PEM', 'private key algorithm is not one Table 2 assigns');
+  try {
+    const key = await crypto.subtle.importKey('pkcs8', der, alg, false, ['sign']);
+    suiteForKey(key);   // an RSA key below the floor is refused here, not at first use
+    return key;
+  } catch (e) {
+    if (e instanceof DenyError) throw e;
     throw new DenyError('ERR_MALFORMED_PEM', 'private key could not be imported (expected PKCS#8)');
   }
 }
 
-/**
- * Sign a canonical string. Returns base64, matching what the metadata document
- * carries and what `policy_validator.py` base64-decodes before verifying.
- */
-export async function signCanonical(canonicalString, privateKey) {
-  const sig = await crypto.subtle.sign(ALGORITHM, privateKey, encoder.encode(canonicalString));
-  return encodeBase64(new Uint8Array(sig));
+/** The preimage: JCS of the body, UTF-8. One function, so signing and verifying cannot drift. */
+export function preimage(body) {
+  return encoder.encode(canonicalize(body));
 }
 
 /**
- * Verify a base64 signature over a canonical string.
- *
- * Returns a boolean rather than throwing: the caller decides which §9.3 phase
- * failed and therefore which error code applies. Any internal failure is `false`
- * — an exception during verification must never become a pass (§13.1).
+ * Sign a body. Returns base64 of the raw signature value, no PEM framing, per
+ * §3.1. The body is signed WHOLE; callers establish its membership first.
  */
-export async function verifyCanonical(canonicalString, signatureB64, publicKey) {
+export async function signBody(body, privateKey) {
+  const suite = suiteForKey(privateKey);
+  const sig = await crypto.subtle.sign(suite.signAlg, privateKey, preimage(body));
+  return bytesToBase64(new Uint8Array(sig));
+}
+
+/**
+ * Verify a base64 signature over a body under a public key.
+ *
+ * A signature of the wrong LENGTH for the key type is refused as an encoding
+ * error (§3.1: ECDSA values are fixed-width, not DER) rather than reported as
+ * a bad signature. Everything else that fails is `false` — an exception during
+ * verification must never become a pass (§15.1).
+ */
+export async function verifyBody(body, signatureB64, publicKey) {
+  const suite = suiteForKey(publicKey);
   let sig;
   try {
-    sig = decodeBase64(signatureB64, 'signature');
+    sig = decodeBase64Strict(signatureB64, 'signature');
   } catch {
     return false;
+  }
+  if (sig.length !== suite.length) {
+    throw new DenyError('ERR_SIGNATURE_ALGORITHM',
+      `signature is ${sig.length} octets; ${suite.label} produces exactly ${suite.length}`);
   }
   try {
-    return await crypto.subtle.verify(ALGORITHM, publicKey, sig, encoder.encode(canonicalString));
+    return await crypto.subtle.verify(suite.signAlg, publicKey, sig, preimage(body));
   } catch {
     return false;
   }
+}
+
+/** §11.6 — SHA-256 over the same preimage as the signatures, lowercase hex. */
+export async function contentHash(body) {
+  const digest = await crypto.subtle.digest('SHA-256', preimage(body));
+  return bytesToHex(new Uint8Array(digest));
 }
 
 /**
- * Sign a field subset the way §9.3 does: filter, canonicalise, sign.
- * The filter is applied here rather than by the caller so the bytes that get
- * signed and the bytes that get verified are produced by one code path.
+ * Wrap a body in a §3.1 envelope: both signatures over the same JCS octets,
+ * and the content hash where §11.6 requires one (policies) and not where it
+ * does not (grants, templates).
  */
-export async function signFieldSet(document, extractor, privateKey) {
-  return signCanonical(canonicalize(extractor(document)), privateKey);
-}
-
-/** The verification counterpart of `signFieldSet`. */
-export async function verifyFieldSet(document, extractor, signatureB64, publicKey) {
-  return verifyCanonical(canonicalize(extractor(document)), signatureB64, publicKey);
+export async function signEnvelope(body, ownerKey, paKey, { withHash = false } = {}) {
+  const envelope = {
+    body,
+    owner_sig: await signBody(body, ownerKey),
+    pa_sig: await signBody(body, paKey),
+  };
+  if (withHash) envelope.content_hash = await contentHash(body);
+  return envelope;
 }

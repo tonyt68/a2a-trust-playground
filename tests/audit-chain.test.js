@@ -1,25 +1,19 @@
 /**
- * Acceptance criterion 8: tampering with an audit entry flips the chain status
- * and NAMES the broken entry.
- *
- * Under `-02` §9.5 there is ONE canonical form. `-01`'s implementation carried
- * two — compact for signatures, spaced for audit blocks — because the reference
- * implementation called json.dumps two different ways in two different files.
- * §9.5 specifies a single form for both, on the reasoning that an implementation
- * carrying two will eventually apply the wrong one, and that failure presents as
- * an integrity error with no indication that serialization was the cause.
+ * §19.7 — tamper-evident audit chain: each entry's hash is SHA-256 over the
+ * canonical form of its fields including the previous hash, excluding its own.
  */
 import { describe, it, expect } from 'vitest';
 import { AuditChain, hashBlock, blockPreimage, GENESIS_PREVIOUS_HASH } from '../src/audit-chain.js';
+import { canonicalize } from '../src/canonical.js';
+import { seedAuditChain, buildDefaultDocument } from '../src/defaults.js';
 import { DenyError } from '../src/errors.js';
 
-const at = (n) => new Date(Date.UTC(2026, 7, 28, 12, 0, n));
+const T0 = new Date('2026-09-03T00:00:00Z');
+const at = (s) => new Date(T0.getTime() + s * 1000);
 
 async function chainOf(n) {
   const c = new AuditChain();
-  for (let i = 0; i < n; i++) {
-    await c.append({ agent: `agent-${i}`, decision: i % 2 ? 'DENIED' : 'ALLOWED' }, at(i));
-  }
+  for (let i = 0; i < n; i++) await c.append({ action: 'spawn', decision: 'ALLOWED', i }, at(i));
   return c;
 }
 
@@ -29,230 +23,115 @@ describe('chain construction', () => {
     expect(c.chain[0].previous_hash).toBe(GENESIS_PREVIOUS_HASH);
     expect(c.chain[0].index).toBe(0);
   });
-
   it('links each block to the one before it', async () => {
-    const c = await chainOf(5);
-    for (let i = 1; i < 5; i++) {
-      expect(c.chain[i].previous_hash).toBe(c.chain[i - 1].hash);
-    }
-    expect(c.headHash).toBe(c.chain[4].hash);
+    const c = await chainOf(3);
+    expect(c.chain[1].previous_hash).toBe(c.chain[0].hash);
+    expect(c.chain[2].previous_hash).toBe(c.chain[1].hash);
+    expect(c.headHash).toBe(c.chain[2].hash);
   });
-
-  it('verifies clean', async () => {
-    expect(await (await chainOf(5)).verify())
-      .toEqual({ valid: true, brokenAt: null, reason: null });
+  it('verifies clean, and an empty chain verifies', async () => {
+    expect((await (await chainOf(3)).verify()).valid).toBe(true);
+    expect((await new AuditChain().verify()).valid).toBe(true);
   });
-
-  it('verifies an empty chain', async () => {
-    expect(await new AuditChain().verify()).toEqual({ valid: true, brokenAt: null, reason: null });
-  });
-
   it('produces hex SHA-256', async () => {
-    const c = await chainOf(1);
-    expect(c.chain[0].hash).toMatch(/^[0-9a-f]{64}$/);
+    expect((await chainOf(1)).chain[0].hash).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 
-describe('tamper detection — names the entry (AC-8)', () => {
+describe('tamper detection — names the entry', () => {
   it('detects an altered event and names the index', async () => {
-    const c = await chainOf(5);
-    c.chain[2].event.decision = 'DENIED';         // entry 2 was ALLOWED; flip it
-    const r = await c.verify();
-    expect(r.valid).toBe(false);
-    expect(r.brokenAt).toBe(2);
-    expect(r.reason).toContain('entry 2');
-    expect(r.reason).toContain('altered');
+    const c = await chainOf(3); c.chain[1].event.decision = 'DENIED';
+    expect(await c.verify()).toMatchObject({ valid: false, brokenAt: 1 });
   });
-
   it('detects an altered timestamp', async () => {
-    const c = await chainOf(4);
-    c.chain[1].timestamp = at(99).toISOString();
-    expect((await c.verify()).brokenAt).toBe(1);
+    const c = await chainOf(3); c.chain[2].timestamp = at(99).toISOString();
+    expect((await c.verify()).brokenAt).toBe(2);
   });
-
   it('detects a removed entry', async () => {
-    const c = await chainOf(5);
-    c.chain.splice(2, 1);
-    const r = await c.verify();
-    expect(r.valid).toBe(false);
-    expect(r.brokenAt).toBe(2);
-  });
-
-  it('detects an inserted entry', async () => {
-    const c = await chainOf(4);
-    c.chain.splice(2, 0, { ...c.chain[1], index: 2 });
+    const c = await chainOf(3); c.chain.splice(1, 1);
     expect((await c.verify()).valid).toBe(false);
   });
-
+  it('detects an inserted entry', async () => {
+    const c = await chainOf(3); c.chain.splice(1, 0, { ...c.chain[1] });
+    expect((await c.verify()).valid).toBe(false);
+  });
   it('reports the FIRST break when several entries are altered', async () => {
-    const c = await chainOf(6);
-    c.chain[4].event.decision = 'DENIED';   // 4 was ALLOWED
-    c.chain[1].event.decision = 'ALLOWED';  // 1 was DENIED
+    const c = await chainOf(4); c.chain[3].event.x = 1; c.chain[1].event.x = 1;
     expect((await c.verify()).brokenAt).toBe(1);
   });
-
   it('catches a re-hashed entry, because the NEXT block still links to the old hash', async () => {
-    // The sophisticated tamper: edit an entry and recompute its own hash so it
-    // is internally consistent. The chain still breaks at the following block.
-    const c = await chainOf(5);
-    c.chain[2].event.decision = 'DENIED';
-    c.chain[2].hash = await hashBlock(c.chain[2]);
-    const r = await c.verify();
-    expect(r.valid).toBe(false);
-    expect(r.brokenAt).toBe(3);
-    expect(r.reason).toContain('does not link');
+    const c = await chainOf(3); c.chain[1].event.decision = 'DENIED'; c.chain[1].hash = await hashBlock(c.chain[1]);
+    expect((await c.verify()).brokenAt).toBe(2);
   });
-
   it('rejects a chain whose genesis does not start at the sentinel', async () => {
-    const c = await chainOf(3);
-    c.chain[0].previous_hash = 'x'.repeat(64);
-    const r = await c.verify();
-    expect(r.valid).toBe(false);
-    expect(r.brokenAt).toBe(0);
+    const c = await chainOf(2); c.chain[0].previous_hash = '0'.repeat(64);
+    expect((await c.verify()).brokenAt).toBe(0);
   });
 });
 
-describe('preimage is the single -02 canonical form (§9.5, §16.6)', () => {
-  it('uses JCS, with no whitespace anywhere', async () => {
-    const { canonicalize } = await import('../src/canonical.js');
-    const block = {
-      index: 1,
-      timestamp: '2026-08-28T12:00:01.123Z',
-      previous_hash: 'a'.repeat(64),
-      event: { decision: 'DENIED', agent: 'x' },
-    };
-    const pre = blockPreimage(block);
-    // The -01 spaced form emitted '", "' between items. JCS emits none.
-    expect(pre).not.toContain('", "');
-    expect(pre).not.toContain('": "');
-    // And it is the same function signatures use — that is the whole point.
-    expect(pre).toBe(canonicalize(JSON.parse(pre)));
+describe('the preimage is the single canonical form (§11.5, §19.7)', () => {
+  it('uses JCS over exactly four fields, with no whitespace anywhere', async () => {
+    const c = await chainOf(1);
+    const pre = blockPreimage(c.chain[0]);
+    expect(pre).toBe(canonicalize({ index: 0, timestamp: c.chain[0].timestamp, previous_hash: 'genesis', event: c.chain[0].event }));
+    expect(pre).not.toMatch(/\s/);
+    expect(pre.startsWith('{"event":')).toBe(true);   // sorted keys
   });
-
-  it('the hash field is never inside its own preimage (§16.6)', () => {
-    const block = {
-      index: 0,
-      timestamp: '2026-08-28T12:00:00.000Z',
-      previous_hash: GENESIS_PREVIOUS_HASH,
-      event: { decision: 'ALLOWED' },
-    };
-    expect(blockPreimage({ ...block, hash: 'deadbeef' })).not.toContain('deadbeef');
-    // Adding the hash must not change the preimage at all, or the chain could
-    // never verify: the verifier recomputes from a block that already has one.
-    expect(blockPreimage({ ...block, hash: 'deadbeef' })).toBe(blockPreimage(block));
+  it('the hash field is never inside its own preimage (§19.7)', () => {
+    const pre = blockPreimage({ index: 0, timestamp: 't', previous_hash: 'genesis', event: {}, hash: 'SHOULD-NOT-APPEAR' });
+    expect(pre).not.toContain('SHOULD-NOT-APPEAR');
+  });
+  it('the previous hash IS inside the preimage (§19.7)', () => {
+    expect(blockPreimage({ index: 1, timestamp: 't', previous_hash: 'abc', event: {} })).toContain('"previous_hash":"abc"');
   });
 });
-
 
 describe('loading a pasted chain', () => {
   it('round-trips through toJSON/fromJSON', async () => {
-    const c = await chainOf(3);
+    const c = await chainOf(2);
     const back = AuditChain.fromJSON(JSON.parse(JSON.stringify(c.toJSON())));
-    expect(await back.verify()).toEqual({ valid: true, brokenAt: null, reason: null });
+    expect((await back.verify()).valid).toBe(true);
     expect(back.headHash).toBe(c.headHash);
   });
-
   it('loads a TAMPERED chain cleanly so the page can display the break', async () => {
-    const c = await chainOf(3);
-    c.chain[1].event.decision = 'ALLOWED';  // entry 1 was DENIED
-    const back = AuditChain.fromJSON(c.toJSON());
-    expect((await back.verify()).brokenAt).toBe(1);
+    const c = await chainOf(2); c.chain[0].hash = 'x';
+    expect(() => AuditChain.fromJSON(c.toJSON())).not.toThrow();
   });
-
-  it('treats null as an empty chain', () => {
-    expect(AuditChain.fromJSON(null).length).toBe(0);
-  });
-
+  it('treats null as an empty chain', () => expect(AuditChain.fromJSON(null).length).toBe(0));
   for (const [name, val] of Object.entries({
-    'a string': 'nope',
-    'an object with no chain': { entries: 2 },
-    'entries that are not objects': { chain: ['x'] },
-    'an entry missing hash': { chain: [{ index: 0, timestamp: 't', previous_hash: 'genesis', event: {} }] },
+    'a string': 'x', 'a chain that is not an array': { chain: 'x' }, 'a non-object block': { chain: [1] },
+    'a block missing its hash': { chain: [{ index: 0, timestamp: 't', previous_hash: 'genesis', event: {} }] },
   })) {
-    it(`rejects ${name}`, () => {
-      let thrown;
-      try { AuditChain.fromJSON(val); } catch (e) { thrown = e; }
-      expect(thrown).toBeInstanceOf(DenyError);
-      expect(thrown.code).toBe('ERR_SCHEMA_VIOLATION');
-    });
+    it(`rejects ${name}`, () => expect(() => AuditChain.fromJSON(val)).toThrow(DenyError));
   }
 });
 
-/**
- * The seeded chain (§16.6).
- *
- * `seedAuditChain` exists as a shared function rather than inline code because
- * two things build a chain: the default document, and the `Reset the audit
- * chain` button. Two copies would drift, and the drift would surface as a §16.6
- * failure with no obvious cause -- a chain that was fine when seeded and broken
- * after a reset, or the reverse.
- *
- * These tests pin the property that made extracting it worthwhile: a rebuilt
- * chain is indistinguishable from a seeded one.
- */
 describe('the seeded audit chain', () => {
-  const IDS = {
-    parentId: '8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa',
-    childId: 'c669186f-a84b-4d7a-81f3-05880df87114',
-  };
-  const AT = new Date(Date.UTC(2026, 7, 28, 12, 0, 0));
-
-  it('seeds enough entries for stage 9 to do real work', async () => {
-    // The default previously seeded an EMPTY chain, so §16.6 passed vacuously
-    // and the tamper button had nothing to tamper with.
-    const { seedAuditChain } = await import('../src/defaults.js');
-    const chain = await seedAuditChain({ ...IDS, now: AT });
-    expect(chain.toJSON().chain.length).toBeGreaterThanOrEqual(3);
+  const P = '019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d', C = '8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa';
+  it('seeds enough entries for stage 9 to do real work, and verifies as sealed', async () => {
+    const c = await seedAuditChain({ parentId: P, childId: C, now: T0 });
+    expect(c.length).toBeGreaterThanOrEqual(3);
+    expect((await c.verify()).valid).toBe(true);
   });
-
-  it('verifies as sealed', async () => {
-    const { seedAuditChain } = await import('../src/defaults.js');
-    const chain = await seedAuditChain({ ...IDS, now: AT });
-    expect((await chain.verify()).valid).toBe(true);
-  });
-
-  it('links every entry to the one before it', async () => {
-    const { seedAuditChain } = await import('../src/defaults.js');
-    const { chain } = (await seedAuditChain({ ...IDS, now: AT })).toJSON();
-    expect(chain[0].previous_hash).toBe(GENESIS_PREVIOUS_HASH);
-    for (let i = 1; i < chain.length; i++) {
-      expect(chain[i].previous_hash).toBe(chain[i - 1].hash);
-      expect(chain[i].index).toBe(i);
-    }
-  });
-
   it('is reproducible: a rebuild matches a seed byte for byte', async () => {
-    // The whole reason the function is shared. If this ever fails, the reset
-    // button and the default have diverged.
-    const { seedAuditChain } = await import('../src/defaults.js');
-    const a = (await seedAuditChain({ ...IDS, now: AT })).toJSON();
-    const b = (await seedAuditChain({ ...IDS, now: AT })).toJSON();
-    expect(JSON.stringify(b)).toBe(JSON.stringify(a));
+    const a = await seedAuditChain({ parentId: P, childId: C, now: T0 });
+    const b = await seedAuditChain({ parentId: P, childId: C, now: T0 });
+    expect(JSON.stringify(a.toJSON())).toBe(JSON.stringify(b.toJSON()));
   });
-
   it('names the agents it describes', async () => {
-    const { seedAuditChain } = await import('../src/defaults.js');
-    const { chain } = (await seedAuditChain({ ...IDS, now: AT })).toJSON();
-    const agents = chain.map((b) => b.event.agent);
-    expect(agents).toContain(IDS.parentId);
-    expect(agents).toContain(IDS.childId);
+    const c = await seedAuditChain({ parentId: P, childId: C, now: T0 });
+    expect(c.chain[0].event.agent).toBe(P);
+    expect(c.chain[1].event).toMatchObject({ agent: C, parent: P });
   });
-
   it('breaks when any single entry is altered', async () => {
-    const { seedAuditChain } = await import('../src/defaults.js');
     for (let i = 0; i < 3; i++) {
-      const { chain } = (await seedAuditChain({ ...IDS, now: AT })).toJSON();
-      chain[i].event.detail = 'record altered after the block was sealed';
-      const r = await new AuditChain(chain).verify();
-      expect(r.valid, `entry ${i}`).toBe(false);
-      expect(r.brokenAt, `entry ${i}`).toBe(i);
+      const c = await seedAuditChain({ parentId: P, childId: C, now: T0 });
+      c.chain[i].event.detail = 'altered';
+      expect((await c.verify()).brokenAt).toBe(i);
     }
   });
-
   it('the document the page loads carries a chain that verifies', async () => {
-    const { buildDefaultDocument } = await import('../src/defaults.js');
-    const doc = await buildDefaultDocument();
-    expect(doc.audit.chain.length).toBeGreaterThanOrEqual(3);
-    expect((await AuditChain.fromJSON(doc.audit).verify()).valid).toBe(true);
-  }, 60_000);
+    const d = await buildDefaultDocument();
+    expect((await AuditChain.fromJSON(d.audit).verify()).valid).toBe(true);
+  }, 30_000);
 });

@@ -1,0 +1,2352 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rfc xmlns:xi="http://www.w3.org/2001/XInclude"
+     docName="draft-tonyai-a2a-trust-03"
+     category="info"
+     ipr="trust200902"
+     submissionType="IETF"
+     version="3">
+
+  <front>
+    <title abbrev="A2A Trust">Agent-to-Agent Trust, Identity, and Verifiable Provenance</title>
+    <seriesInfo name="Internet-Draft" value="draft-tonyai-a2a-trust-03"/>
+
+    <author fullname="Tony Trujillo (tonyai)" initials="T." surname="Trujillo">
+      <organization>Individual Submission</organization>
+      <address>
+        <email>founder@phalanxaisec.com</email>
+      </address>
+    </author>
+
+    <date month="September" day="3" year="2026"/>
+
+    <area>Security</area>
+
+    <abstract>
+      <t>This document defines a trust model for agent-to-agent (A2A)
+      interactions in multi-agent AI systems.  It specifies how agents
+      obtain verifiable identities via CA-signed templates, how spawn
+      chains are cryptographically established and validated, how dynamic
+      policies are governed under a dual-signature model, and how
+      cross-organizational agent interactions are explicitly authorized.
+      The model applies existing PKI primitives (X.509, CRL, CSR) and
+      established identity patterns (OAuth 2.0, On-Behalf-Of) to the
+      problem of agent provenance.  This document does not address
+      agent-to-resource access control, human-in-the-loop orchestration,
+      or agent behavior, as those concerns belong to the resource
+      enforcement layer and the orchestration layer respectively.</t>
+    </abstract>
+  </front>
+
+  <middle>
+
+    <section anchor="introduction" numbered="true" toc="default">
+      <name>Introduction</name>
+      <t>Multi-agent AI systems introduce identity and authorization gaps
+      that existing standards do not fully address.  When Agent A spawns
+      Agent B, and Agent B calls a resource, no current standard defines
+      how the resource verifies that Agent B was legitimately spawned,
+      that its scope has not been escalated, or that its origin template
+      is trusted.</t>
+
+      <t>This document proposes a trust model based on:</t>
+
+      <ul>
+        <li>Agent templates as first-class, CA-signed identity artifacts.</li>
+        <li>Verifiable spawn chains where each agent's provenance is
+        cryptographically traceable to a registered template.</li>
+        <li>Two-lane governance separating static identity (cert-based)
+        from dynamic policy (policy-engine gated).</li>
+        <li>Fail-closed enforcement at every verification step.</li>
+      </ul>
+
+      <t>The model reuses proven PKI primitives and applies them to a new
+      surface -- agent identity -- rather than inventing new
+      cryptographic mechanisms.</t>
+    </section>
+
+    <section anchor="conventions" numbered="true" toc="default">
+      <name>Conventions Used in This Document</name>
+      <t>The key words "<bcp14>MUST</bcp14>", "<bcp14>MUST NOT</bcp14>",
+      "<bcp14>REQUIRED</bcp14>", "<bcp14>SHALL</bcp14>",
+      "<bcp14>SHALL NOT</bcp14>", "<bcp14>SHOULD</bcp14>",
+      "<bcp14>SHOULD NOT</bcp14>", "<bcp14>RECOMMENDED</bcp14>",
+      "<bcp14>NOT RECOMMENDED</bcp14>", "<bcp14>MAY</bcp14>", and
+      "<bcp14>OPTIONAL</bcp14>" in this document are to be interpreted as
+      described in BCP 14 <xref target="RFC2119"/> <xref target="RFC8174"/>
+      when, and only when, they appear in all capitals, as shown here.</t>
+    </section>
+
+    <section anchor="document-encoding" numbered="true" toc="default">
+      <name>Document Encoding</name>
+      <t>Every document defined by this specification -- the Agent Template
+      extension of <xref target="static-field-encoding"/>, the Agent Spawn
+      extension of <xref target="spawn-provenance"/>, the dynamic policy
+      document of <xref target="policy-document-structure"/>, and the
+      cross-organizational grant of <xref target="grant-structure"/> -- is a
+      JSON object serialized using the JSON Canonicalization Scheme (JCS)
+      <xref target="RFC8785"/>.</t>
+
+      <t>Field names in the tables of this document are display names, written
+      for a reader.  The corresponding wire names are lowercase, use underscore
+      as the word separator, and are given in <xref target="wire-name-map"/>.  A
+      relying party <bcp14>MUST</bcp14> compare wire names exactly and
+      <bcp14>MUST NOT</bcp14> apply case folding, Unicode normalization, or any
+      other transformation before comparison.</t>
+
+      <t>A JSON object carried under this specification <bcp14>MUST NOT</bcp14>
+      contain a duplicate member name, which <xref target="RFC8785"/> also
+      requires of any input to JCS.  A relying party <bcp14>MUST</bcp14> detect
+      a duplicate and refuse the document.  This is a requirement on the
+      parser, not only on the document: JSON syntax permits duplicates, and a
+      parser that silently keeps the first or the last occurrence does not
+      satisfy it.  Two such parsers disagree about what was signed while both report success,
+      which is the failure this rule exists to prevent.</t>
+
+      <t>Every timestamp carried under this specification is an
+      <xref target="RFC3339"/> date-time in UTC using the Z designator.  A
+      relying party <bcp14>MUST</bcp14> refuse a timestamp carrying a numeric
+      offset, a lowercase designator, or no designator: a time is compared
+      byte-for-byte in a signed body, and one instant with two spellings is
+      two instants to a signature.  Fractional seconds <bcp14>MAY</bcp14> be
+      present.</t>
+
+      <t>The JSON objects this document defines are flat.  Their members are
+      strings, integers, or arrays of strings, as the tables specify, and
+      nothing else.  A relying party <bcp14>MUST</bcp14> refuse an object
+      carrying a nested object, an array of anything other than strings, a
+      null, a boolean, or a non-integer number, before any further
+      processing.  A parser that will accept only the shapes this document
+      defines has no depth to exhaust and no type to confuse.</t>
+
+      <section anchor="signature-envelope" numbered="true" toc="default">
+        <name>Signature Envelope</name>
+        <t>A signed document is carried inside an envelope: a JSON object whose
+        members are the signed document itself and the values that attest to
+        it.  The envelope members are named as follows.  These names are
+        <bcp14>REQUIRED</bcp14>; a relying party <bcp14>MUST</bcp14> refuse an
+        envelope carrying any member not listed here.</t>
+
+        <table anchor="signature-members">
+          <name>Envelope Members</name>
+          <thead>
+            <tr><th>Member</th><th>Type</th><th>Content</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>body</td><td>object</td><td>The signed document: a template, a policy, or a grant</td></tr>
+            <tr><td>owner_sig</td><td>string</td><td>Signature by the template Owner</td></tr>
+            <tr><td>pa_sig</td><td>string</td><td>Signature by the Policy Authority</td></tr>
+            <tr><td>content_hash</td><td>string</td><td>SHA-256 digest of the signed octets, lowercase hexadecimal.  REQUIRED where <xref target="signature-coverage"/> requires a content hash; otherwise absent</td></tr>
+          </tbody>
+        </table>
+
+        <t>Every signature, and the content hash, is computed over the same
+        octet string: the JCS serialization of body, and nothing else.  The
+        other envelope members are outside body and therefore never inside a
+        preimage.  A signature cannot cover itself, and an implementation that
+        signs the whole envelope produces a value no verifier can reproduce.
+        The rule that a document carrying an undefined field
+        <bcp14>MUST</bcp14> be refused applies to body; the envelope members
+        are not fields of the document they attest to.</t>
+
+        <t>Each signature member <bcp14>MUST</bcp14> be a string containing the
+        base64 encoding <xref target="RFC4648"/> of the raw signature value,
+        without line breaks and without PEM framing.  A relying party
+        <bcp14>MUST</bcp14> refuse an envelope whose owner_sig and pa_sig verify
+        under the same public key: the subjectPublicKeyInfo of the Owner
+        certificate and of the Policy Authority certificate
+        <bcp14>MUST</bcp14> differ.  Two roles satisfied by one key is one
+        role.  The comparison is of keys, not of signature octets: a
+        randomized signature scheme produces different octets from one key
+        on every signing, so equal signatures would never be observed even
+        when a single key holds both roles.</t>
+
+        <t>The signature algorithm is determined by the type of the signer's
+        public key, as carried in the signer's certificate, and is not
+        signalled in the envelope.  A signer <bcp14>MUST</bcp14> use, and a
+        relying party <bcp14>MUST</bcp14> verify with, exactly the algorithm
+        this table assigns; any other combination <bcp14>MUST</bcp14> be
+        refused.</t>
+        <table anchor="signature-algorithms">
+          <name>Signature Algorithm by Key Type</name>
+          <thead>
+            <tr><th>Signer key</th><th>Algorithm</th><th>Signature value</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>RSA, 3072 bits or more</td><td>RSASSA-PSS with SHA-256, MGF1 with SHA-256, salt length 32 octets</td><td>The PSS signature octets</td></tr>
+            <tr><td>EC, curve P-256</td><td>ECDSA with SHA-256</td><td>r and s, each 32 octets, concatenated: 64 octets</td></tr>
+            <tr><td>EC, curve P-384</td><td>ECDSA with SHA-384</td><td>r and s, each 48 octets, concatenated: 96 octets</td></tr>
+            <tr><td>Ed25519</td><td>Ed25519 (PureEdDSA) <xref target="RFC8032"/></td><td>The 64-octet EdDSA signature</td></tr>
+          </tbody>
+        </table>
+        <t>Fixing the digest to the key type is what allows the envelope to
+        carry no algorithm identifier: a verifier learns everything it needs
+        from the certificate it has already validated, and an attacker
+        cannot negotiate a weaker algorithm because there is nothing to
+        negotiate.  ECDSA values are the fixed-width concatenation rather
+        than DER, so that a signature has exactly one encoding.
+        RSASSA-PSS is specified rather than RSASSA-PKCS1-v1_5 because PSS
+        carries a security proof and is the scheme new profiles adopt; a
+        relying party <bcp14>MUST</bcp14> refuse a PKCS1-v1_5 signature even
+        when it verifies.  PSS is randomized: the same key and body produce
+        a different signature on each signing, so a test vector verifies a
+        signature rather than comparing its octets.</t>
+      </section>
+
+      <section anchor="wire-names" numbered="true" toc="default">
+        <name>Wire Names</name>
+        <t>The following table gives the wire name for every display name used in
+        this document.  Where a display name appears in more than one document it
+        has the same wire name in each.</t>
+        <table anchor="wire-name-map">
+          <name>Display Name to Wire Name</name>
+          <thead>
+            <tr><th>Display name</th><th>Wire name</th><th>Defined in</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Subject</td><td>subject</td><td>Sections <xref target="static-fields" format="counter"/>, <xref target="policy-document-structure" format="counter"/></td></tr>
+            <tr><td>Owner</td><td>owner</td><td>Sections <xref target="static-fields" format="counter"/>, <xref target="policy-document-structure" format="counter"/></td></tr>
+            <tr><td>OrgID</td><td>org_id</td><td>Sections <xref target="static-fields" format="counter"/>, <xref target="policy-document-structure" format="counter"/></td></tr>
+            <tr><td>PermittedOperations</td><td>permitted_operations</td><td>Section <xref target="static-fields" format="counter"/></td></tr>
+            <tr><td>AllowedScopes</td><td>allowed_scopes</td><td>Sections <xref target="static-fields" format="counter"/>, <xref target="grant-structure" format="counter"/></td></tr>
+            <tr><td>CanSpawn</td><td>can_spawn</td><td>Section <xref target="static-fields" format="counter"/></td></tr>
+            <tr><td>MaxChildren</td><td>max_children</td><td>Section <xref target="static-fields" format="counter"/></td></tr>
+            <tr><td>PolicyRef</td><td>policy_ref</td><td>Section <xref target="static-fields" format="counter"/></td></tr>
+            <tr><td>TTL</td><td>ttl_seconds</td><td>Sections <xref target="static-fields" format="counter"/>, <xref target="grant-structure" format="counter"/></td></tr>
+            <tr><td>Scopes</td><td>scopes</td><td>Section <xref target="policy-document-structure" format="counter"/></td></tr>
+            <tr><td>SpawnTargets</td><td>spawn_targets</td><td>Section <xref target="policy-document-structure" format="counter"/></td></tr>
+            <tr><td>Version</td><td>version</td><td>Section <xref target="policy-document-structure" format="counter"/></td></tr>
+            <tr><td>IssuedAt</td><td>issued_at</td><td>Sections <xref target="policy-document-structure" format="counter"/>, <xref target="grant-structure" format="counter"/></td></tr>
+            <tr><td>NotAfter</td><td>not_after</td><td>Section <xref target="policy-document-structure" format="counter"/></td></tr>
+            <tr><td>Grantor</td><td>grantor</td><td>Section <xref target="grant-structure" format="counter"/></td></tr>
+            <tr><td>Grantee</td><td>grantee</td><td>Section <xref target="grant-structure" format="counter"/></td></tr>
+            <tr><td>Template</td><td>template</td><td>Section <xref target="grant-structure" format="counter"/></td></tr>
+            <tr><td>MaxSpawns</td><td>max_spawns</td><td>Section <xref target="grant-structure" format="counter"/></td></tr>
+            <tr><td>ParentAgentID</td><td>parent_agent_id</td><td>Section <xref target="spawn-provenance" format="counter"/></td></tr>
+            <tr><td>SpawnedAt</td><td>spawned_at</td><td>Section <xref target="spawn-provenance" format="counter"/></td></tr>
+            <tr><td>SpawnNonce</td><td>spawn_nonce</td><td>Section <xref target="spawn-provenance" format="counter"/></td></tr>
+          </tbody>
+        </table>
+      </section>
+    </section>
+
+    <section anchor="terminology" numbered="true" toc="default">
+      <name>Terminology</name>
+      <dl>
+        <dt>Agent:</dt>
+        <dd>An ephemeral, autonomous process that performs tasks on
+        behalf of a user or another agent.</dd>
+
+        <dt>Agent Template:</dt>
+        <dd>A CA-signed artifact defining exactly one agent's identity,
+        allowed scopes, spawn rules, and policy reference.  A template is
+        not a class from which many agents are made: its Subject is the
+        identifier of the one agent it defines, and spawning from a template
+        instantiates that agent.  A deployment wanting many similar agents
+        registers many templates.</dd>
+
+        <dt>Relying Party:</dt>
+        <dd>Any party that validates an agent's certificate, chain, policy,
+        or grant in order to decide whether to act on it -- a resource, a
+        Registry evaluating a spawn request, or another agent.</dd>
+
+        <dt>Owner:</dt>
+        <dd>The party responsible for a template, identified by the
+        template's Owner field and holding the private key of the Owner
+        certificate described in <xref target="template-dual-signature"/>.</dd>
+
+        <dt>Root Orchestrator:</dt>
+        <dd>An agent that has no parent.  Its certificate carries no Agent
+        Spawn extension (<xref target="spawn-provenance"/>).</dd>
+
+        <dt>Template Registry:</dt>
+        <dd>The authoritative store of approved, signed
+        agent templates for an organization.</dd>
+
+        <dt>Template Registry CA:</dt>
+        <dd>The Certificate Authority that signs agent
+        templates -- the root of trust for the agent ecosystem.</dd>
+
+        <dt>Spawn:</dt>
+        <dd>The act of an agent instantiating a child agent from an
+        approved template.</dd>
+
+        <dt>Spawn Chain:</dt>
+        <dd>The ordered, cryptographically verifiable sequence of
+        agents from the root orchestrator to the current agent.</dd>
+
+        <dt>Policy Authority:</dt>
+        <dd>The entity responsible for countersigning dynamic
+        policy changes after automated gate validation.</dd>
+
+        <dt>CRL:</dt>
+        <dd>Certificate Revocation List -- the list of revoked template
+        and agent certificates maintained by the CA.</dd>
+
+        <dt>CSR:</dt>
+        <dd>Certificate Signing Request -- the template author's request
+        to the CA for a signed template certificate.</dd>
+
+        <dt>Cross-Org Grant:</dt>
+        <dd>An explicit, signed authorization allowing agents
+        from one organization to spawn from a template owned by another.</dd>
+      </dl>
+      <t>The Template Registry and the Template Registry CA are described
+      as one logical entity throughout this document -- "the Registry" --
+      that stores templates, evaluates spawn requests, and issues
+      certificates.  A deployment may separate them; the interface between
+      them is outside this document, and every requirement placed on "the
+      Registry" applies to that entity as a whole.</t>
+    </section>
+
+    <section anchor="problem-statement" numbered="true" toc="default">
+      <name>Problem Statement</name>
+      <t>Multi-agent orchestration creates identity and authorization gaps:</t>
+
+      <figure>
+        <artwork type="ascii-art"><![CDATA[
+   Agent A --> spawns --> Agent B --> calls --> Resource
+        ]]></artwork>
+      </figure>
+
+      <ul>
+        <li>Which identity does the Resource see?</li>
+        <li>How does authorization propagate across the chain without escalating?</li>
+        <li>If Agent B is compromised, can it impersonate Agent A?</li>
+        <li>Who owns the audit trail across the full chain?</li>
+        <li>How does the Resource prove Agent B was authorized to be spawned?</li>
+      </ul>
+
+      <t>The author is not aware of a standard, from the W3C, the IETF, or a
+      vendor, that fully addresses agent
+      provenance in multi-hop chains.</t>
+    </section>
+
+    <section anchor="existing-patterns" numbered="true" toc="default">
+      <name>Existing Patterns and Gaps</name>
+      <t>Several systems address a neighbouring problem.  Workload identity
+      frameworks such as SPIFFE <xref target="SPIFFE"/> issue verifiable
+      identities to services but do not model one service spawning another
+      under a bounded delegation.  Relationship-based authorization systems
+      such as OpenFGA <xref target="OpenFGA"/> evaluate what an identity may
+      do but assume the identity is already established.  PKI secrets engines
+      such as Vault <xref target="VAULTPKI"/> issue certificates on request
+      but leave the content of a certificate to the requester.  This document
+      assumes the zero-trust posture of <xref target="NIST800-207"/>, in which
+      no request is trusted for where it came from, and applies it to the
+      question those systems leave open: how an agent proves what authority it
+      was granted, and by whom.</t>
+
+      <section anchor="obo" numbered="true" toc="default">
+        <name>On-Behalf-Of (OBO)</name>
+        <t>Microsoft Entra ID OBO provides user-to-service delegation:</t>
+
+        <figure>
+          <artwork type="ascii-art"><![CDATA[
+   User --> Agent A (token A) -->
+   Agent A requests token for Agent B on behalf of user -->
+   Entra validates the chain -->
+   Issues scoped delegated token
+          ]]></artwork>
+        </figure>
+
+        <t>Key insight: a trusted third party validates the delegation chain.
+        Agents do not self-assert trust.</t>
+
+        <t>OBO breaks down for agent-to-agent because agents are ephemeral,
+        agent spawning is dynamic, and no registry exists for agent
+        templates.</t>
+      </section>
+
+      <section anchor="token-exchange" numbered="true" toc="default">
+        <name>OAuth 2.0 Token Exchange (RFC 8693)</name>
+        <t>OAuth 2.0 <xref target="RFC6749"/> Token Exchange <xref target="RFC8693"/> defines scope constraint across delegation hops --
+        downstream tokens <bcp14>MUST</bcp14> be a subset of upstream grants.  This
+        document adopts that principle for agent scope inheritance.</t>
+      </section>
+    </section>
+
+    <section anchor="agent-identity" numbered="true" toc="default">
+      <name>Agent Identity</name>
+      <t>Agent identity <bcp14>MUST</bcp14> be established using X.509 certificate chains
+      <xref target="RFC5280"/>.  This reuses the same trust model used by TLS and
+      existing workload identity systems.</t>
+
+      <section anchor="certificate-profile" numbered="true" toc="default">
+        <name>Certificate Profile</name>
+        <t>Certificates used for agent identity <bcp14>MUST</bcp14> conform to
+        <xref target="RFC5280"/>.  In addition, a relying party validating an
+        agent certificate <bcp14>MUST</bcp14> enforce all of the following, and
+        <bcp14>MUST</bcp14> refuse the certificate if any is not satisfied:</t>
+        <ul>
+          <li>An agent certificate <bcp14>MUST</bcp14> carry the basicConstraints
+          extension asserting cA = FALSE.  A certificate that omits
+          basicConstraints <bcp14>MUST</bcp14> be refused; the extension's absence
+          <bcp14>MUST NOT</bcp14> be treated as equivalent to cA = FALSE.</li>
+          <li>A Template Registry CA certificate <bcp14>MUST</bcp14> carry
+          basicConstraints asserting cA = TRUE, marked critical, and
+          <bcp14>MUST</bcp14> assert keyCertSign in its keyUsage extension.</li>
+          <li>Certificates <bcp14>MUST</bcp14> be signed using SHA-256 or a
+          stronger digest.  Certificates signed with SHA-1 or MD5
+          <bcp14>MUST</bcp14> be refused irrespective of key size.</li>
+          <li>Public keys <bcp14>MUST</bcp14> provide at least a 128-bit security
+          level as defined in <xref target="SP800-57"/>: RSA with a modulus of
+          3072 bits or more, an EC key on P-256 or P-384, or an Ed25519 key
+          <xref target="RFC8410"/>.  A relying party <bcp14>MUST</bcp14>
+          refuse a certificate whose key falls below this level, including an
+          RSA key of 2048 bits.  EC and Ed25519 keys are
+          <bcp14>RECOMMENDED</bcp14> over RSA: they reach the floor with
+          smaller certificates and faster generation, and Ed25519 signatures
+          are deterministic.</li>
+          <li>An agent certificate <bcp14>MUST</bcp14> carry the keyUsage
+          extension, marked critical, asserting digitalSignature and no other
+          bit.  keyCertSign and cRLSign <bcp14>MUST NOT</bcp14> be asserted
+          on an agent certificate; a relying party <bcp14>MUST</bcp14> refuse
+          one that asserts either, independently of the basicConstraints
+          check above.</li>
+          <li>The serialNumber <bcp14>MUST</bcp14> contain at least 64 bits
+          of output from a cryptographically secure random number generator.
+          A predictable serial number is an input an attacker controls when
+          searching for a digest collision over a certificate.</li>
+        </ul>
+        <t>An agent certificate asserting cA = TRUE is a certificate entitled to
+        issue further certificates.  Such an agent can create children without
+        presenting a request to the Template Registry CA, which removes both
+        checks required by <xref target="two-check-rule"/> from the spawn path
+        entirely.  No signature is invalid in that scenario and no chain fails to
+        verify; the containment described in <xref target="template-structure"/>
+        is simply never consulted.  This is the reason the constraint is stated
+        normatively here rather than left to the general RFC 5280 profile.</t>
+        <t>These requirements are necessary and not sufficient.  A certificate
+        satisfying all of them establishes identity only; it carries no
+        authorization.  See <xref target="pki-boundary"/>.</t>
+      </section>
+
+      <section anchor="identity-binding" numbered="true" toc="default">
+        <name>Binding Identity to the Certificate</name>
+        <t>An agent has exactly one identity, expressed as a UUID in the
+        canonical lowercase textual form defined in <xref target="RFC9562"/>.  A
+        relying party <bcp14>MUST</bcp14> refuse a certificate whose subject
+        common name is absent, is not a well-formed UUID in that form, or does
+        not match the agent identifier the presenting party claims.  Uppercase
+        hexadecimal <bcp14>MUST</bcp14> be refused rather than case-folded: the
+        identifier is compared byte-for-byte in several places, and an
+        implementation that folds in one of them and not another will accept a
+        document another implementation refuses.</t>
+
+        <t>This document does not constrain which UUID version is used.
+        Implementations <bcp14>SHOULD</bcp14> use version 4 where the time an
+        agent was created should not be inferable from its identifier, and
+        <bcp14>MAY</bcp14> use version 7 where time-ordered identifiers are
+        wanted and that disclosure is acceptable.  A version 7 identifier embeds
+        a millisecond timestamp, and an agent identifier travels to places its
+        template does not -- audit records, policy references, diagnostic
+        messages -- so the disclosure is wider than the certificate's own notBefore field.</t>
+
+        <t>Where a chain document restates that identifier alongside the
+        certificate, every restatement <bcp14>MUST</bcp14> be identical to the
+        subject common name, and a relying party <bcp14>MUST</bcp14> refuse the
+        document if any two disagree.  An implementation
+        <bcp14>MUST NOT</bcp14> treat one restatement as authoritative and the
+        others as advisory.</t>
+
+        <t>This requirement exists because a restated identifier that no
+        signature covers is an unsigned claim sitting next to a signed one.
+        Without this rule a chain could name one agent in the position a relying
+        party reads and present a certificate issued to a different agent, and
+        both artifacts would validate on their own terms.</t>
+      </section>
+
+      <section anchor="csr-flow" numbered="true" toc="default">
+        <name>Certificate Signing Request Flow</name>
+        <figure>
+          <artwork type="ascii-art"><![CDATA[
+   Template Author
+       | defines template (scopes, spawn rules, TTL, owner)
+       | generates CSR
+       v
+   Template Registry CA
+       | validates template conformance
+       | signs the template certificate
+       v
+   Signed Agent Template (registered)
+       |
+       v
+   Orchestrator spawns agent from signed template
+       | agent receives a certificate the CA issues from it
+       | CA chain proves provenance
+       v
+   Resource validates certificate chain:
+       - certificate issued by a trusted Template Registry CA?
+       - Agent Template extension present and well-formed?
+       - scope within bounds?
+       - ALLOW or DENY
+          ]]></artwork>
+        </figure>
+      </section>
+
+      <section anchor="cert-chain-structure" numbered="true" toc="default">
+        <name>Certificate Chain Structure</name>
+        <figure>
+          <artwork type="ascii-art"><![CDATA[
+   Template Registry CA (root of trust)
+       |
+       | issues BOTH certificates (Section 9.3)
+       |
+       +--> Orchestrator Agent Certificate
+       |      Subject CN:  9f3c...  (a UUID, Section 7.2)
+       |      Issuer:      Template Registry CA
+       |      Agent Template extension (Section 8.2):
+       |        subject: 9f3c...  (equals Subject CN, 9.3)
+       |        owner, org_id
+       |        permitted_operations: [spawn, delegate]
+       |        allowed_scopes:       [read:data, write:data]
+       |        can_spawn: [2b7e...], max_children: 5
+       |        policy_ref, ttl_seconds: 3600
+       |
+       +--> Child Agent Certificate
+              Subject CN:  2b7e...  (a UUID)
+              Issuer:      Template Registry CA
+              Agent Template extension:
+                subject: 2b7e...
+                allowed_scopes: [read:data]  (subset, 10.3)
+                ttl_seconds:    900          (shorter, SHOULD)
+              Agent Spawn extension (Section 10.5):
+                parent_agent_id: 9f3c...
+                spawned_at, spawn_nonce
+
+   An agent certificate never issues a certificate (Section 7.1).
+   The parent-child link is recorded in the child's Agent Spawn
+   extension; the chain of authority runs through the CA.
+          ]]></artwork>
+        </figure>
+      </section>
+    </section>
+
+    <section anchor="template-structure" numbered="true" toc="default">
+      <name>Template Structure</name>
+
+      <section anchor="static-fields" numbered="true" toc="default">
+        <name>Static Fields</name>
+        <t>The following fields <bcp14>MUST</bcp14> be present in every agent template
+        certificate and <bcp14>MUST NOT</bcp14> be modified without full re-certification:</t>
+
+        <table>
+          <thead>
+            <tr><th>Field</th><th>Required</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Subject</td><td>REQUIRED</td><td>Unique template identifier</td></tr>
+            <tr><td>Issuer</td><td>REQUIRED</td><td>Template Registry CA</td></tr>
+            <tr><td>Owner</td><td>REQUIRED</td><td>Verified identity of template owner</td></tr>
+            <tr><td>OrgID</td><td>REQUIRED</td><td>CA-validated organization identifier</td></tr>
+            <tr><td>PermittedOperations</td><td>REQUIRED</td><td>Operations this agent may perform</td></tr>
+            <tr><td>AllowedScopes</td><td>REQUIRED</td><td>Maximum scopes this agent may hold</td></tr>
+            <tr><td>CanSpawn</td><td>REQUIRED</td><td>Whitelist of permitted child templates</td></tr>
+            <tr><td>MaxChildren</td><td>REQUIRED</td><td>Maximum concurrent child agents</td></tr>
+            <tr><td>PolicyRef</td><td>REQUIRED</td><td>Pointer to dynamic policy store</td></tr>
+            <tr><td>TTL</td><td>REQUIRED</td><td>Maximum agent lifetime</td></tr>
+          </tbody>
+        </table>
+        <t>This document defines one value of PermittedOperations: spawn, which
+        an agent <bcp14>MUST</bcp14> hold to invoke
+        <xref target="spawn-chain-validation"/>.  Any other value, including
+        those shown in examples, is defined by the deployment and carries no
+        meaning under this specification.  A template whose CanSpawn is
+        non-empty while its PermittedOperations omits spawn describes an agent
+        permitted to spawn specific children and not permitted to spawn; the
+        conformance gate of <xref target="template-conformance-gate"/>
+        <bcp14>SHOULD</bcp14> refuse it, and a Registry <bcp14>MUST</bcp14>
+        refuse a spawn request from it.</t>
+      </section>
+
+      <section anchor="static-field-encoding" numbered="true" toc="default">
+        <name>Encoding of Static Fields</name>
+        <t>The fields in <xref target="static-fields"/> <bcp14>MUST</bcp14> be
+        carried in a single X.509 certificate extension, identified by the
+        object identifier 2.25.318754453516410815925104555075461256891 and
+        referred to in this document as the Agent Template extension.  The
+        extension <bcp14>MUST</bcp14> be marked critical.  A validator that
+        does not implement this specification therefore refuses the
+        certificate, as <xref target="RFC5280"/> requires of any unrecognized
+        critical extension, rather than accepting it as an ordinary client
+        certificate and granting whatever its issuer's chain would grant.
+        The certificate is unusable except by a party that understands what
+        it says, which is the fail-closed outcome
+        <xref target="fail-closed"/> requires; an agent certificate has no
+        legitimate use outside this specification.</t>
+
+        <t>The extnValue <bcp14>MUST</bcp14> be a DER OCTET STRING whose contents
+        are the UTF-8 encoding of a JSON object, serialized as required by
+        <xref target="document-encoding"/>.  A relying party
+        <bcp14>MUST</bcp14> refuse a certificate whose Agent Template extension
+        is not valid JCS, and <bcp14>MUST NOT</bcp14> attempt to repair or
+        re-canonicalize it.</t>
+
+        <t>The JSON object <bcp14>MUST</bcp14> carry exactly the following
+        members, all of which are <bcp14>REQUIRED</bcp14>.  Wire names are as
+        given in <xref target="wire-name-map"/>.  A relying party
+        <bcp14>MUST</bcp14> refuse a certificate whose Agent Template extension
+        omits any member, carries a member not listed here, or carries a member
+        whose type differs from the type given.</t>
+
+        <table anchor="template-members">
+          <name>Agent Template Extension Members</name>
+          <thead>
+            <tr><th>Member</th><th>Type</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>subject</td><td>string</td></tr>
+            <tr><td>owner</td><td>string</td></tr>
+            <tr><td>org_id</td><td>string</td></tr>
+            <tr><td>permitted_operations</td><td>array of string</td></tr>
+            <tr><td>allowed_scopes</td><td>array of string</td></tr>
+            <tr><td>can_spawn</td><td>array of string</td></tr>
+            <tr><td>max_children</td><td>integer</td></tr>
+            <tr><td>policy_ref</td><td>string</td></tr>
+            <tr><td>ttl_seconds</td><td>integer</td></tr>
+          </tbody>
+        </table>
+
+        <t>The ttl_seconds member states a duration in seconds; the display name
+        TTL in <xref target="static-fields"/> does not carry a unit, and a
+        duration whose unit is inferred is a duration two implementations will
+        infer differently.</t>
+
+        <t>The Issuer field of <xref target="static-fields"/> has no member in
+        this extension.  X.509 already carries the issuer, and a second copy
+        inside an extension the issuer signs could disagree with the copy the
+        relying party validated the signature against.  A relying party
+        <bcp14>MUST</bcp14> take the issuer from the certificate.</t>
+
+        <t>A certificate <bcp14>MUST NOT</bcp14> carry more than one Agent
+        Template extension, and a relying party <bcp14>MUST</bcp14> refuse a
+        certificate carrying two rather than choosing between them.  The duplicate
+        member rule of <xref target="document-encoding"/> applies, and is a
+        requirement on the parser used to read the extension.</t>
+
+        <t>A relying party <bcp14>MUST</bcp14> impose a limit on the size of the
+        extension before parsing it, and <bcp14>MUST</bcp14> refuse an extension
+        exceeding that limit rather than attempting a partial parse.  The
+        extension arrives inside a certificate presented by the party whose
+        authority it describes; it is attacker-controlled input up to the point
+        the issuer's signature has been verified, and that signature covers
+        whether the bytes were issued, not whether they are safe to parse.
+        Implementations <bcp14>SHOULD</bcp14> verify the certificate signature
+        before parsing the extension, so that malformed input from an unsigned
+        certificate is discarded without being decoded at all.</t>
+
+        <t>Placing these fields in the certificate rather than in a document
+        accompanying it is deliberate.  <xref target="static-fields"/> requires
+        that they not change without re-certification.  A field carried outside
+        the certificate is signed by whoever assembled the document, not by the
+        Template Registry CA, so an agent could present a valid certificate
+        beside a template granting authority the CA never issued.  Carrying them
+        inside the certificate makes the immutability requirement a property of
+        the artifact rather than a rule an implementation is asked to
+        remember.</t>
+      </section>
+
+      <section anchor="dynamic-policy-bounds" numbered="true" toc="default">
+        <name>Dynamic Policy Bounds</name>
+        <t>Dynamic policies <bcp14>MUST</bcp14> be bounded by the static template fields.
+        A dynamic policy <bcp14>MUST NOT</bcp14> grant scopes beyond AllowedScopes.
+        A dynamic policy <bcp14>MUST NOT</bcp14> add spawn targets beyond CanSpawn.</t>
+        <t>A relying party <bcp14>MUST</bcp14> evaluate these bounds itself, on
+        every validation, against the static fields of the template certificate
+        naming the subject the policy governs.  This evaluation
+        <bcp14>MUST</bcp14> be independent of signature validity -- a bounds
+        violation is refused whether or not the signatures verify -- and it is
+        performed after signature verification, in the order given by
+        <xref target="policy-change-sequence"/>, so that a refusal under this
+        section reports an authentic document whose content is not permitted.
+        A policy exceeding the bounds <bcp14>MUST</bcp14> be refused before it
+        is applied, however many valid signatures it carries.</t>
+        <t>The signatures required by <xref target="dual-signature"/> and the
+        bounds required here answer different questions.  The signatures
+        establish who authorized a change.  They do not, and cannot, establish
+        that the change was within the ceiling the template set, because the
+        ceiling is stated in a certificate that no signature over the policy
+        covers.  An implementation that treats a valid dual signature as
+        sufficient authority to apply a policy has removed the only mechanism
+        bounding what a policy may grant.</t>
+        <t>Refusal under this section is a distinct condition from a signature
+        failure, and implementations <bcp14>SHOULD</bcp14> report it distinctly:
+        the document is authentic and its content is not permitted.  Reporting it
+        as a signature failure misdirects the operator to the wrong lane of
+        <xref target="two-lane-model"/>.</t>
+      </section>
+    </section>
+
+    <section anchor="template-authoring" numbered="true" toc="default">
+      <name>Template Authoring and Attestation</name>
+      <t>A template is authored before any certificate is issued against it.
+      This section specifies the checks that <bcp14>MUST</bcp14> pass before a
+      Template Registry CA issues a certificate carrying the fields of
+      <xref target="static-fields"/>.</t>
+
+      <section anchor="template-conformance-gate" numbered="true" toc="default">
+        <name>Conformance Gate</name>
+        <t>Every field marked REQUIRED in <xref target="static-fields"/>
+        <bcp14>MUST</bcp14> be present and non-null before a template is signed.
+        A template missing any REQUIRED field is non-conforming and
+        <bcp14>MUST</bcp14> be refused, both at signing and again at issuance.
+        An implementation <bcp14>MUST NOT</bcp14> sign a non-conforming template,
+        and <bcp14>MUST NOT</bcp14> issue a certificate against one by omitting
+        the corresponding member from the Agent Template extension.</t>
+        <t>The gate is applied twice deliberately.  A template that was
+        conforming when signed can be edited afterwards, and an issuance path
+        that trusts the signature without re-checking conformance will issue a
+        certificate whose extension is missing a member the relying party
+        requires.</t>
+      </section>
+
+      <section anchor="template-dual-signature" numbered="true" toc="default">
+        <name>Dual Attestation</name>
+        <t>A template <bcp14>MUST</bcp14> carry two signatures before it is
+        eligible for issuance: one from the template Owner and one from the
+        Policy Authority.  Both signatures <bcp14>MUST</bcp14> be computed over
+        the same octet string, as required by
+        <xref target="signature-envelope"/>, being the JCS serialization of the
+        template restricted to the members of
+        <xref target="template-members"/>.  A relying party
+        <bcp14>MUST</bcp14> verify both, and <bcp14>MUST</bcp14> refuse the
+        template if either is absent or does not verify.</t>
+        <t>Signature verification <bcp14>MUST</bcp14> occur after the conformance
+        gate of <xref target="template-conformance-gate"/>, not before.  A
+        signature over an incomplete body is a valid signature over an incomplete
+        body.</t>
+        <t>Every member that becomes part of the Agent Template extension
+        <bcp14>MUST</bcp14> be inside the signed body.  A member carried into a
+        certificate without having been covered by both signatures has entered
+        the certificate without the approval the two signatures exist to
+        record.</t>
+        <t>Both signatures <bcp14>MUST</bcp14> use the algorithm that
+        <xref target="signature-algorithms"/> assigns to the signer's key
+        type, over a key meeting the strength floor of
+        <xref target="certificate-profile"/>.  The requirement is stated by
+        reference rather than restated, because two lists of acceptable
+        algorithms in one document will eventually disagree, and the weaker
+        of the two becomes the one an implementation follows.</t>
+
+        <t>The Owner and the Policy Authority each hold a certificate
+        conforming to <xref target="certificate-profile"/>, issued by the
+        Template Registry CA or by a CA the relying party trusts for that
+        purpose.  A relying party <bcp14>MUST</bcp14> validate that
+        certificate to a trust anchor it holds before verifying any signature
+        with its key, and <bcp14>MUST</bcp14> refuse a signature whose
+        certificate does not validate: a signature that verifies under an
+        untrusted key establishes nothing.  The subject common name of the
+        Owner certificate <bcp14>MUST</bcp14> equal the template's owner
+        member; that equality is what binds the string in owner to a key.
+        The Policy Authority certificate is a trust decision the relying
+        party configures, one per Registry.</t>
+      </section>
+
+      <section anchor="template-issuance" numbered="true" toc="default">
+        <name>Issuance</name>
+        <t>On issuance the Template Registry CA <bcp14>MUST</bcp14> re-apply the
+        conformance gate, <bcp14>MUST</bcp14> re-verify both signatures, and
+        <bcp14>MUST</bcp14> copy the signed members into the Agent Template
+        extension of <xref target="static-field-encoding"/> without alteration.
+        The CA <bcp14>MUST</bcp14> set the certificate subject common name to
+        the value of the template's subject member, which <bcp14>MUST</bcp14>
+        satisfy <xref target="identity-binding"/>, and <bcp14>MUST</bcp14> set
+        the issuer to its own name.  The template carries no issuer member, and
+        the CA <bcp14>MUST NOT</bcp14> take the issuer from the template.  A
+        relying party <bcp14>MUST</bcp14> refuse a certificate whose subject
+        common name differs from the subject member of its Agent Template
+        extension.</t>
+        <t>The CA <bcp14>MUST</bcp14> set the certificate's notAfter to no later
+        than its notBefore plus the template's ttl_seconds, so that the TTL of
+        <xref target="static-fields"/> is enforced by ordinary certificate path
+        validation and not only by a relying party that reads the extension.  A
+        relying party <bcp14>MUST</bcp14> refuse a certificate whose notAfter
+        minus notBefore, in seconds, exceeds its ttl_seconds: a certificate that outlives its own
+        stated lifetime was not issued as this section requires.</t>
+
+        <t>ttl_seconds <bcp14>MUST NOT</bcp14> exceed 604800 (seven days), and
+        <bcp14>SHOULD NOT</bcp14> exceed 86400 (one day).  A relying party
+        <bcp14>MUST</bcp14> refuse a certificate whose ttl_seconds exceeds the
+        maximum.  An agent is ephemeral by the definition in
+        <xref target="terminology"/>; its certificate's lifetime is the
+        longest an attacker holding its key can act if revocation is slow to
+        propagate, and <xref target="fail-closed"/> can only refuse a
+        certificate a relying party knows to be revoked.  A short lifetime
+        bounds that window without depending on revocation reaching every
+        relying party.</t>
+      </section>
+    </section>
+
+    <section anchor="spawn-chain-validation" numbered="true" toc="default">
+      <name>Spawn Chain Validation</name>
+
+      <section anchor="two-check-rule" numbered="true" toc="default">
+        <name>Two-Check Spawn Rule</name>
+        <t>Every spawn <bcp14>MUST</bcp14> pass two independent checks.  Either check
+        failing <bcp14>MUST</bcp14> result in spawn denial with no fallback.  The Template Registry performs both checks, as
+        <xref target="spawn-validation-sequence"/> specifies.</t>
+
+        <t>Check 1 -- Static (from the spawning agent's certificate): The
+        spawning agent's PermittedOperations <bcp14>MUST</bcp14> include
+        spawn, and the requested child template <bcp14>MUST</bcp14> appear in
+        the spawning agent's CanSpawn list.  Both are read from the Agent
+        Template extension of the spawning agent's certificate, never from a
+        document the agent supplies.</t>
+
+        <t>Check 2 -- Dynamic (Registry live lookup):
+        The requested child template <bcp14>MUST</bcp14> be currently registered,
+        CA-signed, not self-signed, not present in the current CRL, not
+        DISABLED under <xref target="template-lifecycle"/>, and owned either
+        by the spawning agent's organization or by an organization that has
+        issued a grant under <xref target="cross-org-interaction"/> naming the
+        spawning agent's organization as Grantee.</t>
+
+        <t>Rationale: CanSpawn alone is insufficient because the certificate
+        may be stale and a template may have been revoked since issuance.
+        Registry lookup alone is insufficient because any party could
+        forge a request claiming any template.  Both checks <bcp14>MUST</bcp14> pass.</t>
+      </section>
+
+      <section anchor="spawn-validation-sequence" numbered="true" toc="default">
+        <name>Spawn Validation Sequence</name>
+        <figure>
+          <artwork type="ascii-art"><![CDATA[
+   1.  CanSpawn check -- child template in CanSpawn list?
+       NO  --> DENY, audit log
+       YES --> continue
+
+   2.  Registry check -- registered, CA-signed, not revoked?
+       NO  --> DENY, audit log
+       YES --> continue
+
+   3.  Scope check -- requested scope subset of parent scopes?
+       NO  --> DENY, audit log
+       YES --> continue
+
+   4.  MaxChildren check -- current children < MaxChildren?
+       NO  --> DENY, audit log
+       YES --> spawn approved
+
+   5.  Template Registry CA issues the child certificate with:
+       - parent identity embedded (delegation chain)
+       - scope equal to requested scope (not exceeding parent)
+       - spawn timestamp and nonce (replay prevention)
+       - audit log entry written
+          ]]></artwork>
+        </figure>
+        <t>The count compared against MaxChildren in step 4 is held by the
+        Template Registry, which is the only party that observes every spawn
+        under a template.  The Registry <bcp14>MUST</bcp14> perform that
+        comparison as part of Check 2 of <xref target="two-check-rule"/>,
+        atomically with recording the new child, so that two concurrent spawn
+        requests cannot both observe a count one below the limit and both
+        succeed.  A relying party validating a chain document counts only the
+        children that document names, and <bcp14>MUST</bcp14> refuse a document
+        in which that count exceeds the parent's MaxChildren; that is a
+        consistency check on the document, not the enforcement of the cap, and
+        an implementation <bcp14>MUST NOT</bcp14> present it as such.</t>
+
+        <t>The Template Registry CA performs steps 1 through 4 and issues the
+        certificate in step 5.  The spawning agent presents a spawn request --
+        the child template's subject, the requested scopes, a timestamp, and a
+        nonce per <xref target="replay-attacks"/> -- and receives the issued
+        certificate; it signs nothing, because
+        <xref target="certificate-profile"/> forbids an agent certificate from
+        issuing.  Steps 1 and 3 are evaluated against the spawning agent's own
+        Agent Template extension, which the Registry reads from the
+        certificate it presented.</t>
+      </section>
+
+      <section anchor="scope-constraint" numbered="true" toc="default">
+        <name>Scope Constraint</name>
+        <t>A child agent's AllowedScopes <bcp14>MUST</bcp14> be a subset of the
+        parent agent's AllowedScopes: every scope granted to the child
+        <bcp14>MUST</bcp14> also be held by the parent.  A child <bcp14>MUST
+        NOT</bcp14> be granted any scope the parent does not itself hold;
+        scope escalation across agent hops is explicitly prohibited.
+        Equality is permitted -- a child <bcp14>MAY</bcp14> be granted the
+        same scope set as its parent, or fewer.</t>
+
+        <t>Example:</t>
+        <figure>
+          <artwork type="ascii-art"><![CDATA[
+   Parent has:  read:data, write:data
+   Child gets:  read:data              -- valid
+   Child gets:  read:data, write:data  -- valid (same as parent)
+   Child gets:  admin:data             -- MUST be rejected
+          ]]></artwork>
+        </figure>
+
+        <t>A scope is an opaque token.  Two scopes are the same scope when their
+        octets are identical, and a relying party <bcp14>MUST NOT</bcp14>
+        apply case folding, Unicode normalization, prefix matching, wildcard
+        expansion, or any hierarchy: write:data does not imply read:data, and
+        admin:* names nothing.  A scope <bcp14>MUST</bcp14> be between 1 and 64
+        octets, each from the set of lowercase ASCII letters, ASCII digits,
+        colon, underscore, and hyphen.  A relying party <bcp14>MUST</bcp14>
+        refuse a document carrying a scope outside that syntax; the syntax is
+        constrained so that byte comparison is also visual comparison, and a
+        confusable character cannot name a scope that looks like another.</t>
+
+        <t>What a scope grants access to -- a secrets store, a data set, a
+        tool -- is resource-layer authorization and is outside this document,
+        as the Abstract states.  This document bounds which scopes an agent
+        may hold and how that bound narrows across a spawn; it does not define
+        what any scope means.  A deployment that needs to express "this agent
+        may read vault A" does so with a scope such as secrets:vault-a:read,
+        carried in allowed_scopes, bounded by the parent's allowed_scopes, and
+        interpreted by the resource that owns vault A.  The registry of
+        <xref target="iana-scope-registry"/> exists so that such names can
+        eventually mean the same thing across organizations.</t>
+
+        <t>A collection of scopes is a set.  The order in which its members
+        appear is not significant to any comparison in this document, and a
+        collection carrying the same scope twice is malformed and
+        <bcp14>MUST</bcp14> be refused.  The subset test above is therefore
+        set containment, and two conforming implementations reach the same
+        answer for the same two collections regardless of ordering.  Order is
+        significant only to serialization: <xref target="RFC8785"/> preserves
+        array order, so the octets a signature covers depend on it.  An
+        implementation that reorders a collection before verifying it has
+        changed those octets, and the signature fails; reordering is therefore
+        not a normalization step.  Comparison is performed on the parsed set,
+        verification on the octets as received.</t>
+
+        <t>A request for no scopes <bcp14>MUST</bcp14> be refused.  The empty
+        set is a subset of every set, so an empty request satisfies the
+        containment test vacuously while declaring no intent for the test to
+        bound.</t>
+
+        <t>A child's ttl_seconds <bcp14>SHOULD NOT</bcp14> exceed its
+        parent's.  A delegation that outlives its delegator holds authority
+        derived from an agent that no longer exists; the parent's
+        certificate may be renewed, but a child sized to outlast it was
+        sized on the assumption that it would not need to be.</t>
+      </section>
+
+      <section anchor="audit-requirements" numbered="true" toc="default">
+        <name>Audit Requirements</name>
+        <t>Every spawn event <bcp14>MUST</bcp14> be logged with: spawning agent identity,
+        child template identity, requested scope, granted scope,
+        timestamp, outcome (ALLOWED or DENIED), and reason if denied.</t>
+      </section>
+
+      <section anchor="spawn-provenance" numbered="true" toc="default">
+        <name>Encoding of Spawn Provenance</name>
+        <t>Step 5 of <xref target="spawn-validation-sequence"/> issues a child
+        certificate carrying its parent's identity, the time of the spawn, and
+        the nonce of the request that produced it.  These <bcp14>MUST</bcp14>
+        be carried in a single X.509 extension, marked critical for the
+        reason given in <xref target="static-field-encoding"/>, identified by
+        the object identifier 2.25.316124730704531463413455892107752909312
+        and referred to in this document as the Agent Spawn extension.  It is
+        encoded exactly as the Agent Template extension of
+        <xref target="static-field-encoding"/>: a DER OCTET STRING containing
+        the UTF-8 JCS serialization of a JSON object, subject to the same rules
+        on criticality, duplicate members, duplicate extensions, size limits,
+        and parse ordering.</t>
+
+        <table anchor="spawn-members">
+          <name>Agent Spawn Extension Members</name>
+          <thead>
+            <tr><th>Member</th><th>Type</th><th>Content</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>parent_agent_id</td><td>string</td><td>The parent's identifier, in the form required by <xref target="identity-binding"/></td></tr>
+            <tr><td>spawned_at</td><td>string</td><td>The instant of issuance, per <xref target="RFC3339"/>, in UTC</td></tr>
+            <tr><td>spawn_nonce</td><td>string</td><td>The nonce of the spawn request, per <xref target="replay-attacks"/></td></tr>
+          </tbody>
+        </table>
+
+        <t>All three members are <bcp14>REQUIRED</bcp14> when the extension is
+        present.  A certificate for an agent that has a parent
+        <bcp14>MUST</bcp14> carry the extension; a certificate for an agent that
+        has none -- a root orchestrator -- <bcp14>MUST NOT</bcp14>.  A relying
+        party validating a chain <bcp14>MUST</bcp14> refuse a certificate whose
+        parent_agent_id names no agent in the chain, <bcp14>MUST</bcp14> refuse
+        one whose parent_agent_id differs from the parent the chain document
+        names for it, and <bcp14>MUST</bcp14> refuse a root whose certificate
+        carries the extension.</t>
+
+        <t>This is what makes a spawn chain cryptographically traceable rather
+        than merely asserted.  A parent identifier carried only in a chain
+        document is an unsigned claim beside a signed certificate: a child could
+        name any parent it liked, and the containment of
+        <xref target="scope-constraint"/> would be evaluated against whichever
+        parent it chose.  Carrying the link in the certificate means the CA that
+        issued the child attested to which agent spawned it, and that
+        attestation is what the scope and spawn checks are evaluated
+        against.</t>
+
+        <t>The parent's Agent Template extension, not the child's Agent Spawn
+        extension, is where the child's authority is bounded.  The Agent Spawn
+        extension says who the parent is; the parent's certificate says what
+        the parent may delegate.</t>
+
+        <t>The absence of the Agent Spawn extension asserts that no agent
+        spawned this one; it does not exempt the certificate from anything.  A
+        root is legitimate for the same reason any agent certificate is: it was
+        issued by the Template Registry CA from a template attested under
+        <xref target="template-authoring"/>, and it chains to that CA under
+        <xref target="certificate-profile"/>.  No party can declare itself a
+        root, because no party other than the CA can issue a certificate that
+        validates, and the CA issues only from attested templates.  A relying
+        party verifies a root exactly as it verifies any other agent
+        certificate.</t>
+
+        <t>spawned_at and spawn_nonce record the request the Registry accepted.
+        The freshness window of <xref target="replay-attacks"/> applies to that
+        request, at the Registry, at the time it is made.  A relying party
+        validating an issued certificate later <bcp14>MUST NOT</bcp14> apply
+        the window to spawned_at: a certificate an hour old is as valid as one
+        a second old, and its currency is governed by its validity period and
+        its revocation state, not by when it was requested.  A relying party
+        <bcp14>MUST</bcp14>, however, refuse a chain in which two certificates
+        carry the same spawn_nonce, since the Registry issues each nonce
+        once.</t>
+      </section>
+    </section>
+
+    <section anchor="dynamic-policy-governance" numbered="true" toc="default">
+      <name>Dynamic Policy Governance</name>
+
+      <section anchor="two-lane-model" numbered="true" toc="default">
+        <name>Two-Lane Model</name>
+        <t>Template certificate (static): WHO the agent is and WHO it
+        can spawn.  Changes require full re-certification.</t>
+
+        <t>Dynamic policy (fast lane): WHAT the agent can do within
+        the bounds of the template certificate.  Changes require
+        dual signature (<xref target="dual-signature"/>).</t>
+
+        <t>Dynamic policies <bcp14>MUST NOT</bcp14> exceed the bounds defined in the
+        static template certificate.</t>
+      </section>
+
+      <section anchor="ownership" numbered="true" toc="default">
+        <name>Ownership</name>
+        <t>Template ownership <bcp14>MUST</bcp14> be established at certificate signing
+        time and embedded in the Owner and OrgID fields.  Only the
+        verified owner of the organization that signed the template
+        <bcp14>MAY</bcp14> submit policy changes.  Verified means holding the
+        private key of the Owner certificate of
+        <xref target="template-dual-signature"/>, whose subject common name
+        equals the template's Owner field; no other form of verification is
+        defined by this document.</t>
+      </section>
+
+      <section anchor="dual-signature" numbered="true" toc="default">
+        <name>Dual Signature Requirement</name>
+        <t>Every policy change <bcp14>MUST</bcp14> be signed by two independent parties:</t>
+
+        <ol>
+          <li>Owner -- proves the right to change the policy.</li>
+          <li>Policy Authority -- proves the policy passed automated
+          validation gates.</li>
+        </ol>
+
+        <t>Neither signature alone is sufficient.  Both <bcp14>MUST</bcp14> be present
+        and valid for a policy to be accepted.</t>
+
+        <figure>
+          <artwork type="ascii-art"><![CDATA[
+   Owner key  +  Policy Authority key  =  policy accepted
+       ^                  ^
+   who owns it        passed the gates
+          ]]></artwork>
+        </figure>
+      </section>
+
+      <section anchor="policy-document-structure" numbered="true" toc="default">
+        <name>Dynamic Policy Document Structure</name>
+        <t>A dynamic policy document <bcp14>MUST</bcp14> contain the following
+        fields.  This is the complete set; a document containing any other field
+        <bcp14>MUST</bcp14> be refused, since an unrecognized field is either
+        meaningless or an attempt to convey authority the profile does not
+        define.</t>
+        <table anchor="policy-fields">
+          <name>Dynamic Policy Document Fields</name>
+          <thead>
+            <tr><th>Field</th><th>Required</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Subject</td><td>REQUIRED</td><td>Identifier of the agent this policy governs; MUST match the Subject of the template certificate</td></tr>
+            <tr><td>Owner</td><td>REQUIRED</td><td>Submitting owner; MUST match Owner in the template certificate</td></tr>
+            <tr><td>OrgID</td><td>REQUIRED</td><td>Submitting organization; MUST match OrgID in the template certificate</td></tr>
+            <tr><td>Scopes</td><td>REQUIRED</td><td>Scopes granted by this policy; bounded by AllowedScopes</td></tr>
+            <tr><td>SpawnTargets</td><td>OPTIONAL</td><td>Spawn targets granted by this policy; bounded by CanSpawn. Absent means none are granted</td></tr>
+            <tr><td>Version</td><td>REQUIRED</td><td>Monotonically increasing integer, scoped to Subject</td></tr>
+            <tr><td>IssuedAt</td><td>REQUIRED</td><td>Timestamp of issuance, per <xref target="RFC3339"/></td></tr>
+            <tr><td>NotAfter</td><td>OPTIONAL</td><td>Expiry of this policy; MUST NOT be later than the notAfter of the certificate the policy governs.  Absent means equal to it</td></tr>
+          </tbody>
+        </table>
+        <t>Version is scoped to the Subject, not global.  A relying party
+        <bcp14>MUST</bcp14> refuse a policy whose Version is not strictly greater
+        than the Version of the policy currently in force for that Subject.</t>
+        <t>A policy is never valid beyond the notAfter of the certificate it
+        governs, whether or not NotAfter is present.  NotAfter can only shorten
+        that period.  A relying party <bcp14>MUST</bcp14> treat an absent
+        NotAfter as equal to the certificate's notAfter, <bcp14>MUST</bcp14>
+        refuse a policy whose NotAfter is later than it, and
+        <bcp14>MUST</bcp14> refuse a policy presented after either has
+        passed.</t>
+      </section>
+
+      <section anchor="canonicalization" numbered="true" toc="default">
+        <name>Canonicalization</name>
+        <t>Signatures and hashes defined by this document are computed over
+        bytes, so the mapping from a policy document to those bytes
+        <bcp14>MUST</bcp14> be deterministic and identical across
+        implementations.</t>
+        <t>Wherever this document requires a canonical form -- of a policy
+        document, of any field subset thereof, or of an audit log entry -- that
+        canonical form <bcp14>MUST</bcp14> be the JSON Canonicalization Scheme
+        (JCS) serialization defined in <xref target="RFC8785"/>.  A single
+        canonical form is specified for all of them deliberately: an
+        implementation carrying two serializations will eventually apply the
+        wrong one, and the resulting failure presents as a signature or integrity
+        error with no indication that serialization was the cause.</t>
+        <t>JCS is specified rather than described here because a bespoke
+        serialization would require this document to define property ordering,
+        string escaping, and number formatting correctly and completely, and any
+        error in that definition surfaces to implementers as a signature failure
+        that appears to be a cryptographic fault.  Serializations that differ
+        only in whitespace, key order, or the escaping of non-ASCII characters
+        produce different bytes and therefore different signatures; implementers
+        <bcp14>MUST NOT</bcp14> assume a language's default JSON encoder produces
+        the canonical form, as most do not.</t>
+      </section>
+
+      <section anchor="signature-coverage" numbered="true" toc="default">
+        <name>Signature and Hash Coverage</name>
+        <t>Both signatures required by <xref target="dual-signature"/> are
+        computed over the preimage defined in <xref target="signature-envelope"/>:
+        the canonical form (<xref target="canonicalization"/>) of body.  Because
+        <xref target="policy-document-structure"/> makes its table the complete
+        content of body, every field in that table is inside the preimage and
+        none is excluded from either signature.  This section and
+        <xref target="signature-envelope"/> describe the same octets.</t>
+        <t>In particular, Version <bcp14>MUST</bcp14> be inside the signed
+        preimage.  Version exists to prevent replay, and it cannot serve that
+        purpose while it remains modifiable without invalidating a signature: an
+        attacker holding no key can otherwise take a superseded but validly
+        signed policy, increment its Version, and present it as current.  Both
+        signatures verify, the content hash matches, and the version reads as
+        current.  The same reasoning applies to Subject: a signature that does
+        not bind the policy to the agent it governs permits a policy issued for
+        one agent to be presented for another.</t>
+        <t>The content hash required by <xref target="policy-change-sequence"/>
+        <bcp14>MUST</bcp14> be SHA-256, or a stronger digest, computed over the
+        same canonical form and the same field set as the signatures.  The hash
+        field itself is stored alongside the policy document and
+        <bcp14>MUST NOT</bcp14> be included in its own preimage.  The content
+        hash is a derived value: a relying party <bcp14>MUST</bcp14> recompute
+        it from body and refuse the document on a mismatch, and
+        <bcp14>MUST NOT</bcp14> use the envelope's content_hash as an input to
+        any decision.  A modified content_hash therefore causes a refusal and
+        nothing else; it is not a value a signature needs to protect, because
+        the signature already covers everything the hash summarizes.</t>
+        <t>The signatures and the content hash are carried in the envelope of
+        <xref target="signature-envelope"/>, outside the policy document they
+        attest to.  A relying party <bcp14>MUST</bcp14> refuse a policy document
+        that carries any of them as a policy field: they are not in
+        <xref target="policy-document-structure"/>, and a value inside body
+        would be inside its own preimage.</t>
+      </section>
+
+      <section anchor="policy-change-sequence" numbered="true" toc="default">
+        <name>Policy Change Sequence</name>
+        <figure>
+          <artwork type="ascii-art"><![CDATA[
+   1.  Identity and ownership verification
+       - requester matches Owner in template certificate?
+       - requester OrgID matches certificate OrgID?
+       NO  --> rejected, audit logged
+
+   2.  Automated gate (policy engine):
+       - scope within AllowedScopes?
+       - spawn targets within CanSpawn?
+       - no conflicts with active policies?
+       ANY FAIL --> rejected
+
+   3.  Dual signature applied:
+       Owner signs, Policy Authority countersigns
+
+   4.  Policy stored with dual signature, version, timestamp,
+       and content hash
+
+   5.  Relying party validates at runtime:
+       - both signatures valid?
+       - version current? (replay prevention)
+       - hash matches? (tamper detection)
+       - policy within template certificate bounds?
+       ANY FAIL --> DENY, audit logged
+          ]]></artwork>
+        </figure>
+      </section>
+
+      <section anchor="threat-coverage" numbered="true" toc="default">
+        <name>Threat Coverage</name>
+        <table>
+          <thead>
+            <tr><th>Scenario</th><th>Single Sig Gap</th><th>Dual Sig Fix</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Rogue Policy Authority</td>
+              <td>Pushes bad policy</td>
+              <td>Owner key missing</td>
+            </tr>
+            <tr>
+              <td>Rogue owner</td>
+              <td>Bypasses automated gates</td>
+              <td>PA won't countersign</td>
+            </tr>
+            <tr>
+              <td>Compromised owner key</td>
+              <td>Attacker modifies</td>
+              <td>Automated gates enforced</td>
+            </tr>
+            <tr>
+              <td>Compromised Policy Auth</td>
+              <td>Pushes bad policy</td>
+              <td>Owner key missing</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <t>The table above concerns the dual signature.  The following concerns
+        the encodings this document specifies, and the attack each one closes.</t>
+
+        <table anchor="encoding-threats">
+          <name>Encoding Threat Coverage</name>
+          <thead>
+            <tr><th>Scenario</th><th>Without the encoding</th><th>With it</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Replayed Owner signature</td><td>An Owner signature over anything other than the policy body verifies for every later policy on that agent; a rogue Policy Authority reuses it</td><td>Both signatures cover the same body (<xref target="signature-envelope"/>); a signature is specific to one policy</td></tr>
+            <tr><td>Replayed policy</td><td>A superseded but validly signed policy is presented as current</td><td>Version is inside the preimage and must exceed the version in force (<xref target="policy-document-structure"/>)</td></tr>
+            <tr><td>Swapped template</td><td>A valid certificate is presented beside a template granting authority the CA never issued</td><td>Static fields live in the certificate (<xref target="static-field-encoding"/>); there is no separate template to swap</td></tr>
+            <tr><td>Forged parent</td><td>A child names whichever parent gives it the widest scope; containment is evaluated against that parent</td><td>The parent link is in the child's certificate, attested by the CA (<xref target="spawn-provenance"/>)</td></tr>
+            <tr><td>Mismatched identity</td><td>A chain names one agent and presents a certificate issued to another; both validate on their own terms</td><td>Every restatement must equal the subject CN (<xref target="identity-binding"/>)</td></tr>
+            <tr><td>Silent parser disagreement</td><td>Two parsers keep different duplicates of a key and both report success</td><td>Duplicate detection is a parser requirement (<xref target="document-encoding"/>)</td></tr>
+            <tr><td>Unlocatable revocation</td><td>Revocation must be consulted but the certificate does not say where</td><td>cRLDistributionPoints or OCSP is required (<xref target="revocation-discovery"/>)</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </section>
+
+    <section anchor="template-versioning" numbered="true" toc="default">
+      <name>Template Versioning</name>
+
+      <section anchor="full-re-verification" numbered="true" toc="default">
+        <name>Full Re-Verification Required</name>
+        <t>A new template version <bcp14>MUST</bcp14> undergo full re-verification from
+        scratch.  Trust <bcp14>MUST NOT</bcp14> be inherited from a previous version.</t>
+
+        <t>Rationale: inheriting trust from v1 would allow a compromised
+        v1 certificate to bootstrap trust for v2.</t>
+
+        <t>A new version keeps the template's Subject and receives a new
+        certificate.  The Registry <bcp14>MUST</bcp14> revoke the prior
+        certificate when it issues the new one, so that one identity never
+        has two valid certificates; a relying party that encounters two
+        unrevoked certificates for one Subject <bcp14>MUST</bcp14> refuse
+        both.</t>
+      </section>
+
+      <section anchor="versioning-principle" numbered="true" toc="default">
+        <name>Versioning Principle</name>
+        <t>Everything on the old template chain continues to work unchanged
+        as long as the certificate is valid.  New connections and
+        functionality are opt-in -- only available after the new template
+        chain is fully verified and explicitly adopted.</t>
+      </section>
+
+      <section anchor="non-inheritance-rules" numbered="true" toc="default">
+        <name>Non-Inheritance Rules</name>
+        <t>The following <bcp14>MUST NOT</bcp14> be inherited from a previous version:</t>
+        <ul>
+          <li>Trust chain</li>
+          <li>Cross-organizational grants</li>
+          <li>CanSpawn list</li>
+          <li>Dynamic policies</li>
+        </ul>
+      </section>
+
+      <section anchor="template-lifecycle" numbered="true" toc="default">
+        <name>Template Lifecycle</name>
+        <dl>
+          <dt>ACTIVE:</dt>
+          <dd>Template is trusted.  New spawns accepted.</dd>
+          <dt>DISABLED:</dt>
+          <dd>No new spawns.  Existing agents run to TTL expiry.  Reversible.</dd>
+          <dt>DELETED:</dt>
+          <dd>Certificate revoked, CRL updated, registry entry removed.
+          Irreversible.  Audit log preserved.</dd>
+        </dl>
+
+        <t>DISABLED is a Registry state, not a revocation.  It is reported by
+        the Registry in Check 2 of <xref target="two-check-rule"/> and is not
+        carried in a CRL.  Because only the Registry performs spawns, no
+        other party needs to distinguish DISABLED from ACTIVE: a relying
+        party validating an existing agent's certificate consults revocation
+        state as usual, and an agent issued under a template that is later
+        DISABLED remains valid until its TTL or its revocation.</t>
+
+        <t>Disable <bcp14>SHOULD</bcp14> precede delete.  Implementations <bcp14>SHOULD</bcp14> enforce
+        a mandatory waiting period between DISABLED and DELETED.</t>
+      </section>
+
+      <section anchor="cross-org-grant-reissuance" numbered="true" toc="default">
+        <name>Cross-Organizational Grant Re-Issuance</name>
+        <t>Cross-organizational grants <bcp14>MUST</bcp14> be explicitly re-issued for
+        each new template version.  Grants <bcp14>MUST NOT</bcp14> automatically roll
+        over on version upgrade.</t>
+      </section>
+    </section>
+
+    <section anchor="cross-org-interaction" numbered="true" toc="default">
+      <name>Cross-Organizational Agent Interaction</name>
+
+      <section anchor="explicit-grant" numbered="true" toc="default">
+        <name>Explicit Grant Requirement</name>
+        <t>Cross-organizational agent spawning <bcp14>MUST</bcp14> be explicitly authorized
+        by the resource-owning organization.  No implicit trust exists
+        between organizations.</t>
+      </section>
+
+      <section anchor="grant-structure" numbered="true" toc="default">
+        <name>Grant Structure</name>
+        <t>A cross-organizational grant <bcp14>MUST</bcp14> contain exactly the
+        following fields:</t>
+        <table anchor="grant-fields">
+          <name>Cross-Organizational Grant Fields</name>
+          <thead>
+            <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Grantor</td><td>string</td><td>OrgID of the resource-owning organization</td></tr>
+            <tr><td>Grantee</td><td>string</td><td>OrgID of the requesting organization</td></tr>
+            <tr><td>Template</td><td>string</td><td>Subject of the template granted, in the form of <xref target="identity-binding"/></td></tr>
+            <tr><td>AllowedScopes</td><td>array of string</td><td>MUST be a subset of the template's AllowedScopes</td></tr>
+            <tr><td>IssuedAt</td><td>string</td><td>Instant of issuance, per <xref target="RFC3339"/>, in UTC</td></tr>
+            <tr><td>TTL</td><td>integer</td><td>Grant validity period in seconds, counted from IssuedAt</td></tr>
+            <tr><td>MaxSpawns</td><td>integer</td><td>Maximum concurrent agents permitted under this grant</td></tr>
+          </tbody>
+        </table>
+        <t>Wire names are given in <xref target="wire-name-map"/>.  A grant is
+        signed as specified in <xref target="signature-envelope"/>, by the
+        grantor's Owner and Policy Authority; the signatures are envelope
+        members and are not fields of the grant.</t>
+        <t>A grant expires at IssuedAt plus TTL seconds.  A relying party
+        <bcp14>MUST</bcp14> refuse a grant whose expiry has passed, and
+        <bcp14>MUST</bcp14> refuse one whose IssuedAt is later than its own
+        clock by more than the freshness window of <xref target="replay-attacks"/>.
+        A duration with no stated origin has no expiry two parties can agree
+        on; IssuedAt is the origin.</t>
+        <t>A cross-organizational spawn is evaluated and issued by the
+        Grantor's Registry, which owns the template and the CA that issues
+        against it.  That Registry holds the count compared against MaxSpawns
+        and <bcp14>MUST</bcp14> enforce it atomically with recording the
+        spawn, exactly as <xref target="spawn-validation-sequence"/> requires
+        of MaxChildren.  The Grantee's organization performs no part of the
+        issuance and cannot enforce the cap.</t>
+      </section>
+
+      <section anchor="trust-anchor-options" numbered="true" toc="default">
+        <name>Trust Anchor Options</name>
+        <dl>
+          <dt>Federated CA:</dt>
+          <dd>Both organizations trust a shared root CA.</dd>
+          <dt>Explicit CA trust:</dt>
+          <dd>Org-B explicitly trusts Org-A's CA.</dd>
+          <dt>Third-party CA:</dt>
+          <dd>Both organizations use a public CA.</dd>
+        </dl>
+        <t>Which option applies is deployment policy.  Under each, a relying
+        party in the Grantee organization <bcp14>MUST</bcp14> hold a trust
+        anchor for the Grantor's Template Registry CA and
+        <bcp14>MUST</bcp14> validate the Grantor's Owner and Policy Authority
+        certificates to it, as <xref target="template-dual-signature"/>
+        requires, before accepting a grant's signatures.  A grant whose
+        signatures cannot be validated to a trust anchor the relying party
+        holds <bcp14>MUST</bcp14> be refused.</t>
+      </section>
+
+      <section anchor="unilateral-revocation" numbered="true" toc="default">
+        <name>Unilateral Revocation</name>
+        <t>The granting organization <bcp14>MAY</bcp14> revoke a cross-organizational grant
+        without the cooperation of the receiving organization.  Upon
+        revocation, all agents spawned under the affected grant <bcp14>MUST</bcp14> be
+        treated as untrusted on next validation.</t>
+      </section>
+
+      <section anchor="federated-audit" numbered="true" toc="default">
+        <name>Federated Audit</name>
+        <t>Each organization <bcp14>MUST</bcp14> maintain its own independent audit trail.
+        Audit records <bcp14>MUST NOT</bcp14> depend on the other organization's systems.</t>
+      </section>
+    </section>
+
+    <section anchor="revocation" numbered="true" toc="default">
+      <name>Revocation</name>
+
+      <section anchor="template-revocation" numbered="true" toc="default">
+        <name>Template Revocation</name>
+        <t>Template revocation <bcp14>MUST</bcp14> be performed by recording the
+        template certificate as revoked in the CA's revocation state -- an
+        X.509 CRL, an OCSP responder, or an equivalent revocation registry
+        consulted on every validation.  All agent certificates derived
+        from a revoked template <bcp14>MUST</bcp14> be treated as untrusted on the
+        next revocation check.</t>
+      </section>
+
+      <section anchor="individual-agent-revocation" numbered="true" toc="default">
+        <name>Individual Agent Revocation</name>
+        <t>Individual agents <bcp14>MAY</bcp14> be revoked by explicit certificate
+        revocation or, outside this document, by removal of authorization
+        relationships at the resource layer.</t>
+      </section>
+
+      <section anchor="automation-requirement" numbered="true" toc="default">
+        <name>Automation Requirement</name>
+        <t>Routine revocation (TTL expiry, task completion) <bcp14>MUST</bcp14> be fully
+        automated.  Human involvement <bcp14>SHOULD</bcp14> be reserved for incident
+        response and high-impact decisions.</t>
+      </section>
+
+      <section anchor="revocation-discovery" numbered="true" toc="default">
+        <name>Locating Revocation State</name>
+        <t>Every certificate issued under this specification, other than a
+        self-signed trust anchor, <bcp14>MUST</bcp14> carry either the cRLDistributionPoints extension or
+        the authorityInfoAccess extension with an id-ad-ocsp accessMethod, both
+        as defined in <xref target="RFC5280"/>.  A relying party
+        <bcp14>MUST</bcp14> refuse a certificate carrying neither, because the
+        obligation in <xref target="template-revocation"/> to consult revocation
+        state on every validation cannot be discharged against a certificate that
+        does not say where that state lives.</t>
+        <t>A relying party <bcp14>MUST NOT</bcp14> treat an unreachable
+        revocation source as an absence of revocation.  This restates
+        <xref target="fail-closed"/> and is stated again here because it is the
+        requirement implementations most often relax under operational
+        pressure.</t>
+      </section>
+    </section>
+
+    <section anchor="failure-model" numbered="true" toc="default">
+      <name>Failure Model</name>
+
+      <section anchor="fail-closed" numbered="true" toc="default">
+        <name>Fail Closed</name>
+        <t>Any verification step that cannot be completed <bcp14>MUST</bcp14> result in
+        DENY.  This includes:</t>
+        <ul>
+          <li>CA unreachable</li>
+          <li>Registry unreachable</li>
+          <li>CRL unreachable</li>
+          <li>Certificate expired or revoked</li>
+          <li>Scope escalation attempt</li>
+          <li>Policy invalid or unsigned</li>
+          <li>Dual signature missing or invalid</li>
+        </ul>
+        <t>Implementations <bcp14>MUST NOT</bcp14> provide a degraded mode that allows
+        partial spawning or execution when verification infrastructure
+        is unavailable.</t>
+      </section>
+    </section>
+
+    <section anchor="conformance-requirements" numbered="true" toc="default">
+      <name>Conformance Requirements</name>
+
+      <section anchor="field-placement" numbered="true" toc="default">
+        <name>Field Placement</name>
+        <t>Implementations <bcp14>MUST</bcp14> place every field in the location specified
+        by this document: <xref target="document-encoding"/>,
+        <xref target="static-field-encoding"/>, and
+        <xref target="spawn-provenance"/>.  Variable placement is not
+        permitted.</t>
+      </section>
+
+      <section anchor="csr-validation" numbered="true" toc="default">
+        <name>CSR Validation</name>
+        <t>Non-conforming CSRs <bcp14>MUST</bcp14> be rejected by the CA.  A non-conforming
+        template <bcp14>MUST NOT</bcp14> be signed.</t>
+      </section>
+
+      <section anchor="test-vectors" numbered="true" toc="default">
+        <name>Test Vectors</name>
+        <t>Implementations <bcp14>MUST</bcp14> provide test vectors -- concrete examples of
+        valid and invalid template chains -- for conformance validation.</t>
+      </section>
+
+      <section anchor="conformance-certification" numbered="true" toc="default">
+        <name>Conformance Claims</name>
+        <t>No conformance certification authority exists for this document.
+        An implementation claiming conformance <bcp14>MUST</bcp14> state the
+        revision it claims, as <xref target="implementation-status"/>
+        describes, and <bcp14>SHOULD</bcp14> publish the results of running
+        the test vectors of <xref target="test-vectors"/> against that
+        revision.  A claim without a stated revision is not a conformance
+        claim.</t>
+      </section>
+
+      <section anchor="reference-implementation" numbered="true" toc="default">
+        <name>Reference Implementation</name>
+        <t>A reference implementation <bcp14>SHOULD</bcp14> be made available including:</t>
+        <ul>
+          <li>Template Registry CA</li>
+          <li>Spawn chain validation</li>
+          <li>SDK with certificate chain validation, registry lookup,
+          and CRL check handling</li>
+          <li>Template linter for pre-submission CSR validation</li>
+        </ul>
+        
+        <t>Known implementations are listed in
+        <xref target="implementation-status"/>.</t>
+      </section>
+    </section>
+
+    <section anchor="iana-considerations" numbered="true" toc="default">
+      <name>IANA Considerations</name>
+
+      <section anchor="iana-oid" numbered="true" toc="default">
+        <name>Object Identifier</name>
+        <t>The Agent Template extension of
+        <xref target="static-field-encoding"/> and the Agent Spawn extension of
+        <xref target="spawn-provenance"/> each use an object identifier under
+        the joint-iso-itu-t UUID arc (2.25), which is self-assigning from a UUID
+        and requires no registration.  This document requests no allocation from
+        any IANA-managed OID arc.  Should this document be adopted, the author is
+        willing to replace them with OIDs under an arc the responsible working
+        group prefers.</t>
+      </section>
+
+      <section anchor="iana-media-type" numbered="true" toc="default">
+        <name>Media Type Registration</name>
+        <t>IANA is requested to register the following media type in the "Media
+        Types" registry, per <xref target="RFC6838"/>.</t>
+        <dl>
+          <dt>Type name:</dt><dd>application</dd>
+          <dt>Subtype name:</dt><dd>a2a-policy+json</dd>
+          <dt>Required parameters:</dt><dd>N/A</dd>
+          <dt>Optional parameters:</dt><dd>N/A</dd>
+          <dt>Encoding considerations:</dt><dd>binary; JSON is UTF-8 encoded and serialized per <xref target="RFC8785"/></dd>
+          <dt>Security considerations:</dt><dd>See <xref target="security-considerations"/> of this document.</dd>
+          <dt>Interoperability considerations:</dt><dd>N/A</dd>
+          <dt>Published specification:</dt><dd>This document</dd>
+          <dt>Applications that use this media type:</dt><dd>Multi-agent systems exchanging dynamic policy documents.</dd>
+          <dt>Fragment identifier considerations:</dt><dd>N/A</dd>
+          <dt>Additional information:</dt><dd>N/A</dd>
+          <dt>Person and email address to contact for further information:</dt><dd>Tony Trujillo, founder@phalanxaisec.com</dd>
+          <dt>Intended usage:</dt><dd>COMMON</dd>
+          <dt>Restrictions on usage:</dt><dd>None</dd>
+          <dt>Author:</dt><dd>Tony Trujillo</dd>
+          <dt>Change controller:</dt><dd>IETF</dd>
+        </dl>
+      </section>
+
+      <section anchor="iana-scope-registry" numbered="true" toc="default">
+        <name>Agent Scope Registry</name>
+        <t>IANA is requested to create a registry titled "A2A Agent Scopes", with
+        a registration policy of Specification Required
+        <xref target="RFC8126"/>.  Each entry carries a scope name, a
+        description, and a reference.  The registry is initially empty; scope
+        names not registered here are private to a deployment and
+        <bcp14>MUST NOT</bcp14> be assumed to carry the same meaning across
+        organizational boundaries.</t>
+      </section>
+    </section>
+
+    <section anchor="implementation-status" numbered="true" toc="default">
+      <name>Implementation Status</name>
+      <t>This section records the status of known implementations of the protocol
+      defined by this specification at the time of posting, as described in
+      <xref target="RFC7942"/>.  It is meant to assist the IETF in its decision
+      processes in progressing drafts to RFCs.  Please note that the listing of
+      any individual implementation here does not imply endorsement by the IETF.
+      Furthermore, no effort has been spent to verify the information presented
+      here that was supplied by IETF contributors.  This is not intended as, and
+      must not be construed to be, a catalog of available implementations or
+      their features.  Readers are advised to note that other implementations may
+      exist.</t>
+
+      <t>According to <xref target="RFC7942"/>, "this will allow reviewers and
+      working groups to assign due consideration to documents that have the
+      benefit of running code, which may serve as evidence of valuable
+      experimentation and feedback that have made the implemented protocols more
+      mature.  It is up to the individual working groups to use this information
+      as they see fit."</t>
+
+      <t><em>This section is to be removed before publishing as an RFC.</em></t>
+
+      <t>Three independent implementations exist at the time of writing.  Each
+      states the revision it was written and verified against, and continues to
+      state that revision until someone re-reads the newer text and re-runs the
+      vectors.  An implementation pinned to an earlier revision remains a correct
+      implementation of that revision; a version string is a conformance claim
+      rather than a label, and advancing one without re-verifying asserts
+      conformance nobody has tested.  Each is tagged in its repository at the
+      commit implementing the revision named here.</t>
+
+      <table anchor="implementations">
+          <name>Known Implementations</name>
+          <thead>
+            <tr><th>Implementation</th><th>Revision</th><th>Notes</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>a2a-trust-playground</td>
+              <td>-03</td>
+              <td>Browser implementation, no installation or backend.  Mints a
+              Registry, attests and issues templates, and validates a chain
+              against every check in this document, reporting the clause
+              governing each refusal.  Tagged impl/draft-03; the
+              implementation of -02 remains retrievable at tag impl/draft-02.
+              Source: https://github.com/tonyt68/a2a-trust-playground</td>
+            </tr>
+            <tr>
+              <td>ietf-a2a-trust-poc</td>
+              <td>-00</td>
+              <td>Registry CA, spawn validation and policy governance services.
+              Tagged impl/draft-00.  Source:
+              https://github.com/tonyt68/ietf-a2a-trust-poc</td>
+            </tr>
+            <tr>
+              <td>hack-my-own-code</td>
+              <td>-00</td>
+              <td>Adversarial implementation that attacks its own conformance.
+              Canonicalizes with a language-specific JSON serialization rather
+              than the scheme required by <xref target="canonicalization"/>, so
+              it does not conform to that section.  Tagged impl/draft-00.
+              Source: https://github.com/tonyt68/hack-my-own-code</td>
+            </tr>
+          </tbody>
+        </table>
+
+      <t>All three are maintained by the author of this document.  They are
+      independent in the sense that they share no code and were written against
+      the specification text rather than against each other; they are not
+      independent in the sense <xref target="RFC7942"/> most values, and a
+      reviewer should weigh them accordingly.  An implementation by an unrelated
+      party would be more informative than all three, and is actively
+      sought.</t>
+    </section>
+
+    <section anchor="security-considerations" numbered="true" toc="default">
+      <name>Security Considerations</name>
+
+      <section anchor="scope-escalation" numbered="true" toc="default">
+        <name>Scope Escalation</name>
+        <t>Implementations <bcp14>MUST</bcp14> enforce at every hop that child
+        agent scopes are a subset of parent scopes: child scopes are
+        contained within parent scopes, and no scope may be introduced that
+        the parent does not already hold.  Failure to enforce this
+        allows privilege escalation across the agent chain.</t>
+      </section>
+
+      <section anchor="replay-attacks" numbered="true" toc="default">
+        <name>Replay Attacks</name>
+        <t>A spawn request <bcp14>MUST</bcp14> carry a timestamp and a nonce.
+        The timestamp <bcp14>MUST</bcp14> be an <xref target="RFC3339"/> instant
+        in UTC.  The nonce <bcp14>MUST</bcp14> be at least 128 bits of output
+        from a cryptographically secure random number generator, encoded as
+        base64 <xref target="RFC4648"/>.  The nonce and timestamp of an accepted
+        request are recorded in the child's Agent Spawn extension
+        (<xref target="spawn-provenance"/>).</t>
+        <t>A relying party <bcp14>MUST</bcp14> refuse a spawn request whose
+        timestamp is more than 60 seconds from the relying party's own clock in
+        either direction, and <bcp14>MUST</bcp14> refuse a request whose nonce it
+        has already seen within that window.  A relying party
+        <bcp14>MUST</bcp14> retain seen nonces for at least twice the freshness
+        window.  Retaining them for exactly the window leaves a request
+        replayable at the boundary, when the record has been discarded but the
+        timestamp is still inside the window at the receiver.</t>
+        <t>The window is specified rather than left to the deployment because a
+        value chosen independently at each end is not a shared window, and the
+        wider of the two is the one an attacker gets.  Accepting a request from
+        the future by the same margin accommodates clock skew; an implementation
+        that accepts only past timestamps will reject legitimate requests from a
+        peer whose clock is marginally ahead.  The window assumes clocks
+        synchronized to within a small fraction of it.  An operator whose
+        clocks cannot meet that assumption <bcp14>MUST</bcp14> treat it as a
+        failure condition under <xref target="fail-closed"/> rather than widen
+        the window; a wider window is a longer replay opportunity for every
+        party, not a fix for one party's clock.</t>
+        <t>Sixty seconds tolerates the skew of any correctly administered clock
+        -- NTP holds hosts within milliseconds -- and bounds the nonce
+        retention obligation of a Registry to two minutes.  It is deliberately
+        tighter than the five minutes Kerberos <xref target="RFC4120"/> adopted:
+        that tolerance was sized for human-operated hosts with unsynchronized
+        clocks, and a spawn request is a sub-second exchange between machines.
+        A window sized for the former is a longer replay opportunity than the
+        latter needs, and a peer whose clock is more than a minute wrong is not
+        a peer to be accommodated.</t>
+      </section>
+
+      <section anchor="compromised-templates" numbered="true" toc="default">
+        <name>Compromised Templates</name>
+        <t>A compromised template certificate <bcp14>MUST</bcp14> be revoked immediately.
+        A single CRL update invalidates all downstream agent certificates
+        derived from that template.</t>
+      </section>
+
+      <section anchor="single-point-of-compromise" numbered="true" toc="default">
+        <name>Single Point of Compromise</name>
+        <t>The dual signature requirement (<xref target="dual-signature"/>) ensures no single
+        compromised party can push unauthorized policy changes.  CA
+        compromise requires full ecosystem re-issuance.</t>
+        <t>Compromise of an Owner or Policy Authority key is handled by
+        revoking its certificate under <xref target="revocation"/>.
+        Policies and templates signed under the compromised key
+        <bcp14>MUST</bcp14> be re-signed under replacement keys, because a
+        relying party cannot distinguish a signature made before the
+        compromise from one made after it; a revoked signing certificate
+        invalidates every signature it ever produced, not only the
+        fraudulent ones.</t>
+      </section>
+
+      <section anchor="cross-org-trust" numbered="true" toc="default">
+        <name>Cross-Organizational Trust</name>
+        <t>Cross-organizational grants <bcp14>MUST</bcp14> be explicitly issued.  Implicit
+        trust between organizations is prohibited.</t>
+      </section>
+
+      <section anchor="pki-boundary" numbered="true" toc="default">
+        <name>PKI Does Not Enforce Authorization</name>
+        <t>Because agent identity is carried in X.509 certificates and the chain
+        is verified on every validation, it is natural to assume the certificate
+        chain also constrains what an agent may do.  It does not, and an
+        implementation built on that assumption is unprotected while appearing
+        rigorous.</t>
+        <t>X.509 carries no representation of the scopes defined by this
+        document.  AllowedScopes, CanSpawn and MaxChildren are conveyed in the
+        template, and no certificate path validation algorithm inspects them.  A
+        conformant X.509 validator presented with an agent certificate whose
+        associated template claims scopes far beyond those its parent holds will
+        report success, because the certificate is genuinely valid and correctly
+        issued.  The over-scoping is not a defect the validator is looking
+        for.</t>
+        <t>The nameConstraints extension does not close this gap.  It constrains
+        the namespace within which a CA may issue, not the authority a subject
+        may claim once issued.  Likewise certificatePolicies expresses which
+        policies a chain supports, not whether a child exceeded its parent, and
+        policy processing is disabled by default in common implementations.</t>
+        <t>Consequently <xref target="dynamic-policy-bounds"/> and
+        <xref target="scope-constraint"/> are load-bearing implementation logic.
+        They are not restatements of a property the certificate chain already
+        guarantees, and an implementation that omits them because "the chain
+        verifies" has no containment at all.  Certificate validity establishes
+        identity.  Authorization is evaluated separately, every time.</t>
+      </section>
+
+      <section anchor="audit-integrity" numbered="true" toc="default">
+        <name>Audit Integrity</name>
+        <t>Audit logs <bcp14>MUST</bcp14> be tamper-evident.  Logs <bcp14>MUST NOT</bcp14> be deletable
+        by agents or orchestrators.  Audit log infrastructure <bcp14>SHOULD</bcp14>
+        be outside the control of the agent ecosystem itself.</t>
+              <t>Each entry's hash <bcp14>MUST</bcp14> be computed as SHA-256, or a
+        stronger digest, over the canonical form
+        (<xref target="canonicalization"/>) of the entry's fields including the
+        previous entry's hash, and excluding the entry's own hash field.  As with
+        policy documents, an unspecified preimage is not a detail: two
+        implementations hashing different field sets each read the other's chain
+        as broken, and a chain that cannot be verified across implementations
+        provides no evidence to anyone but its author.</t>
+</section>
+    
+      <section anchor="privacy-considerations" numbered="true" toc="default">
+        <name>Privacy Considerations</name>
+        <t>The Owner member of a template is carried inside a certificate that
+        is presented to every relying party the agent ever contacts.  An
+        Owner value that identifies a person -- an email address, as the
+        examples in this document use for readability -- is therefore
+        personal data disclosed to every counterparty.  Deployments
+        <bcp14>SHOULD</bcp14> populate Owner with an identifier that is
+        opaque outside the owning organization, and resolve it to a person
+        only within that organization.</t>
+        <t>A version 7 agent identifier discloses the agent's creation time
+        to every party that sees the identifier, as
+        <xref target="identity-binding"/> describes.  Audit records required
+        by <xref target="audit-requirements"/> carry agent identifiers and
+        scopes, and <xref target="federated-audit"/> places one such record
+        in each organization party to a cross-organizational spawn; the
+        OrgID of each is disclosed to the other by the grant itself.</t>
+      </section>
+
+      <section anchor="algorithm-agility" numbered="true" toc="default">
+        <name>Algorithm Agility</name>
+        <t>The signature algorithms of <xref target="signature-algorithms"/>
+        and the key strength floor of <xref target="certificate-profile"/>
+        are classical.  This document does not specify a post-quantum
+        signature algorithm, because no X.509 profile for one had reached
+        the stability this document requires at the time of writing.  The
+        per-key-type mapping is the extension point: a future revision adds
+        a row for a post-quantum key type without changing the envelope or
+        any other structure, and a relying party that does not recognize a
+        key type refuses the signature, which is the fail-closed outcome
+        <xref target="fail-closed"/> requires.</t>
+      </section>
+    </section>
+
+  </middle>
+
+  <back>
+    <references>
+      <name>References</name>
+
+      <references>
+        <name>Normative References</name>
+
+        <reference anchor="RFC2119" target="https://www.rfc-editor.org/info/rfc2119">
+          <front>
+            <title>Key words for use in RFCs to Indicate Requirement Levels</title>
+            <author initials="S." surname="Bradner" fullname="S. Bradner"/>
+            <date month="March" year="1997"/>
+          </front>
+          <seriesInfo name="BCP" value="14"/>
+          <seriesInfo name="RFC" value="2119"/>
+        </reference>
+
+        <reference anchor="RFC8174" target="https://www.rfc-editor.org/info/rfc8174">
+          <front>
+            <title>Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words</title>
+            <author initials="B." surname="Leiba" fullname="B. Leiba"/>
+            <date month="May" year="2017"/>
+          </front>
+          <seriesInfo name="BCP" value="14"/>
+          <seriesInfo name="RFC" value="8174"/>
+        </reference>
+
+        <reference anchor="RFC8032" target="https://www.rfc-editor.org/info/rfc8032">
+          <front>
+            <title>Edwards-Curve Digital Signature Algorithm (EdDSA)</title>
+            <author initials="S." surname="Josefsson" fullname="S. Josefsson"/>
+            <author initials="I." surname="Liusvaara" fullname="I. Liusvaara"/>
+            <date month="January" year="2017"/>
+          </front>
+          <seriesInfo name="RFC" value="8032"/>
+        </reference>
+
+        <reference anchor="RFC8410" target="https://www.rfc-editor.org/info/rfc8410">
+          <front>
+            <title>Algorithm Identifiers for Ed25519, Ed448, X25519, and X448 for Use in the Internet X.509 Public Key Infrastructure</title>
+            <author initials="S." surname="Josefsson" fullname="S. Josefsson"/>
+            <author initials="J." surname="Schaad" fullname="J. Schaad"/>
+            <date month="August" year="2018"/>
+          </front>
+          <seriesInfo name="RFC" value="8410"/>
+        </reference>
+
+        <reference anchor="RFC8785" target="https://www.rfc-editor.org/info/rfc8785">
+          <front>
+            <title>JSON Canonicalization Scheme (JCS)</title>
+            <author initials="A." surname="Rundgren" fullname="A. Rundgren"/>
+            <author initials="B." surname="Jordan" fullname="B. Jordan"/>
+            <author initials="S." surname="Erdtman" fullname="S. Erdtman"/>
+            <date month="June" year="2020"/>
+          </front>
+          <seriesInfo name="RFC" value="8785"/>
+        </reference>
+
+        <reference anchor="SP800-57" target="https://doi.org/10.6028/NIST.SP.800-57pt1r5">
+          <front>
+            <title>Recommendation for Key Management: Part 1 - General</title>
+            <author initials="E." surname="Barker" fullname="E. Barker"/>
+            <date month="May" year="2020"/>
+          </front>
+          <seriesInfo name="NIST SP" value="800-57 Part 1 Rev. 5"/>
+        </reference>
+
+        <reference anchor="RFC5280" target="https://www.rfc-editor.org/info/rfc5280">
+          <front>
+            <title>Internet X.509 Public Key Infrastructure Certificate and
+            Certificate Revocation List (CRL) Profile</title>
+            <author initials="D." surname="Cooper" fullname="D. Cooper"/>
+            <author initials="S." surname="Santesson" fullname="S. Santesson"/>
+            <author initials="S." surname="Farrell" fullname="S. Farrell"/>
+            <author initials="S." surname="Boeyen" fullname="S. Boeyen"/>
+            <author initials="R." surname="Housley" fullname="R. Housley"/>
+            <author initials="W." surname="Polk" fullname="W. Polk"/>
+            <date month="May" year="2008"/>
+          </front>
+          <seriesInfo name="RFC" value="5280"/>
+        </reference>
+
+        <reference anchor="RFC6749" target="https://www.rfc-editor.org/info/rfc6749">
+          <front>
+            <title>The OAuth 2.0 Authorization Framework</title>
+            <author initials="D." surname="Hardt" fullname="D. Hardt"/>
+            <date month="October" year="2012"/>
+          </front>
+          <seriesInfo name="RFC" value="6749"/>
+        </reference>
+
+        <reference anchor="RFC8693" target="https://www.rfc-editor.org/info/rfc8693">
+          <front>
+            <title>OAuth 2.0 Token Exchange</title>
+            <author initials="M." surname="Jones" fullname="M. Jones"/>
+            <author initials="A." surname="Campbell" fullname="A. Campbell"/>
+            <author initials="C." surname="Mortimore" fullname="C. Mortimore"/>
+            <date month="January" year="2020"/>
+          </front>
+          <seriesInfo name="RFC" value="8693"/>
+        </reference>
+
+        <reference anchor="RFC3339" target="https://www.rfc-editor.org/info/rfc3339">
+          <front>
+            <title>Date and Time on the Internet: Timestamps</title>
+            <author initials="G." surname="Klyne" fullname="G. Klyne"/>
+            <author initials="C." surname="Newman" fullname="C. Newman"/>
+            <date month="July" year="2002"/>
+          </front>
+          <seriesInfo name="RFC" value="3339"/>
+        </reference>
+
+        <reference anchor="RFC4648" target="https://www.rfc-editor.org/info/rfc4648">
+          <front>
+            <title>The Base16, Base32, and Base64 Data Encodings</title>
+            <author initials="S." surname="Josefsson" fullname="S. Josefsson"/>
+            <date month="October" year="2006"/>
+          </front>
+          <seriesInfo name="RFC" value="4648"/>
+        </reference>
+
+        <reference anchor="RFC6838" target="https://www.rfc-editor.org/info/rfc6838">
+          <front>
+            <title>Media Type Specifications and Registration Procedures</title>
+            <author initials="N." surname="Freed" fullname="N. Freed"/>
+            <author initials="J." surname="Klensin" fullname="J. Klensin"/>
+            <author initials="T." surname="Hansen" fullname="T. Hansen"/>
+            <date month="January" year="2013"/>
+          </front>
+          <seriesInfo name="BCP" value="13"/>
+          <seriesInfo name="RFC" value="6838"/>
+        </reference>
+
+        <reference anchor="RFC8126" target="https://www.rfc-editor.org/info/rfc8126">
+          <front>
+            <title>Guidelines for Writing an IANA Considerations Section in RFCs</title>
+            <author initials="M." surname="Cotton" fullname="M. Cotton"/>
+            <author initials="B." surname="Leiba" fullname="B. Leiba"/>
+            <author initials="T." surname="Narten" fullname="T. Narten"/>
+            <date month="June" year="2017"/>
+          </front>
+          <seriesInfo name="BCP" value="26"/>
+          <seriesInfo name="RFC" value="8126"/>
+        </reference>
+
+        <reference anchor="RFC9562" target="https://www.rfc-editor.org/info/rfc9562">
+          <front>
+            <title>Universally Unique IDentifiers (UUIDs)</title>
+            <author initials="K." surname="Davis" fullname="K. Davis"/>
+            <author initials="B." surname="Peabody" fullname="B. Peabody"/>
+            <author initials="P." surname="Leach" fullname="P. Leach"/>
+            <date month="May" year="2024"/>
+          </front>
+          <seriesInfo name="RFC" value="9562"/>
+        </reference>
+      </references>
+
+      <references>
+        <name>Informative References</name>
+
+        <reference anchor="RFC4120" target="https://www.rfc-editor.org/info/rfc4120">
+          <front>
+            <title>The Kerberos Network Authentication Service (V5)</title>
+            <author initials="C." surname="Neuman" fullname="C. Neuman"/>
+            <author initials="T." surname="Yu" fullname="T. Yu"/>
+            <author initials="S." surname="Hartman" fullname="S. Hartman"/>
+            <author initials="K." surname="Raeburn" fullname="K. Raeburn"/>
+            <date month="July" year="2005"/>
+          </front>
+          <seriesInfo name="RFC" value="4120"/>
+        </reference>
+
+        <reference anchor="RFC7942" target="https://www.rfc-editor.org/info/rfc7942">
+          <front>
+            <title>Improving Awareness of Running Code: The Implementation Status Section</title>
+            <author initials="Y." surname="Sheffer" fullname="Y. Sheffer"/>
+            <author initials="A." surname="Farrel" fullname="A. Farrel"/>
+            <date month="July" year="2016"/>
+          </front>
+          <seriesInfo name="BCP" value="205"/>
+          <seriesInfo name="RFC" value="7942"/>
+        </reference>
+
+
+        <reference anchor="NIST800-207">
+          <front>
+            <title>Zero Trust Architecture</title>
+            <author initials="S." surname="Rose" fullname="S. Rose"/>
+            <author initials="O." surname="Borchert" fullname="O. Borchert"/>
+            <author initials="S." surname="Mitchell" fullname="S. Mitchell"/>
+            <author initials="S." surname="Connelly" fullname="S. Connelly"/>
+            <date month="August" year="2020"/>
+          </front>
+          <seriesInfo name="NIST SP" value="800-207"/>
+        </reference>
+
+        <reference anchor="SPIFFE" target="https://spiffe.io">
+          <front>
+            <title>Secure Production Identity Framework for Everyone</title>
+            <author>
+              <organization>SPIFFE Project</organization>
+            </author>
+            <date/>
+          </front>
+        </reference>
+
+        <reference anchor="OpenFGA" target="https://openfga.dev">
+          <front>
+            <title>OpenFGA Specification</title>
+            <author>
+              <organization>OpenFGA Project</organization>
+            </author>
+            <date/>
+          </front>
+        </reference>
+
+        <reference anchor="VAULTPKI"
+                   target="https://developer.hashicorp.com/vault/docs/secrets/pki">
+          <front>
+            <title>Vault PKI Secrets Engine</title>
+            <author>
+              <organization>HashiCorp</organization>
+            </author>
+            <date/>
+          </front>
+        </reference>
+      </references>
+    </references>
+
+    <section anchor="changes-03" numbered="true" toc="default">
+      <name>Changes since draft-tonyai-a2a-trust-02</name>
+      <t>
+        As with the previous revision, every change here was surfaced by
+        implementing the -02 text rather than by re-reading it.  Three
+        implementations of one specification produced three different answers to
+        the same questions, which is what the changes below exist to prevent.
+      </t>
+      <ul>
+        <li>Specified how documents are encoded on the wire
+        (<xref target="document-encoding"/>).  Field tables throughout -02 gave
+        display names only, so implementations invented their own member names
+        and produced signatures no other implementation could reproduce.</li>
+        <li>Specified the signature envelope
+        (<xref target="signature-envelope"/>).  -02 required two signatures but
+        never said where they live, how they are encoded, or that they are
+        excluded from the body they sign.  It also declared that a policy
+        document carrying any undefined field must be refused, which forbade the
+        signature fields the same document requires.</li>
+        <li>Specified the encoding of the static template fields
+        (<xref target="static-field-encoding"/>).  -02 listed which fields a
+        template carries but never said where in the certificate they live, so
+        two implementations conforming to the text could not validate each
+        other's certificates.</li>
+        <li>Specified the binding between an agent's identity and its certificate
+        (<xref target="identity-binding"/>), and required every restatement of an
+        agent identifier to agree with the certificate subject.  -02 carried the
+        identifier in three places and required no agreement among them, so a
+        chain naming one agent while presenting a certificate issued to another
+        validated cleanly.</li>
+        <li>Specified the form of an agent identifier
+        (<xref target="identity-binding"/>).  -02 did not mention UUIDs at all,
+        while one implementation refused anything that was not a lowercase
+        version 4; an implementation reading only the text could have used any
+        string and been conformant.</li>
+        <li>Specified how a template is authored and attested before issuance
+        (<xref target="template-authoring"/>).  -02 described what a template
+        contains and how an issued certificate is validated, but not how a
+        template comes to exist, so the conformance gate and dual attestation
+        that existing implementations perform were unspecified.</li>
+        <li>Specified the nonce and freshness window for replay prevention
+        (<xref target="replay-attacks"/>).  -02 required "a timestamp and nonce"
+        and a "defined freshness window" without defining either, which a
+        conforming implementation could satisfy with an eight-bit nonce and a
+        window of a day.</li>
+        <li>Required certificates to say where their revocation state lives
+        (<xref target="revocation-discovery"/>).  -02 required revocation to be
+        consulted on every validation without requiring any means of finding
+        it.</li>
+        <li>Specified the encoding of spawn provenance
+        (<xref target="spawn-provenance"/>).  -02 issued a child certificate
+        "with parent identity embedded" and a nonce, and gave neither a
+        location.  The link from child to parent lived in an unsigned chain
+        document, so the provenance the Introduction calls cryptographically
+        traceable was asserted rather than attested.</li>
+        <li>Corrected the certificate chain figure
+        (<xref target="cert-chain-structure"/>), which showed an agent
+        certificate issuing a child certificate -- forbidden by
+        <xref target="certificate-profile"/> -- and non-UUID subjects,
+        forbidden by <xref target="identity-binding"/>.</li>
+        <li>Typed the cross-organizational grant fields
+        (<xref target="grant-structure"/>) and removed the row that listed a
+        signature as a field of the grant; signatures are envelope members.
+        Bounded a policy's NotAfter by the certificate's notAfter rather than by
+        a duration it could not be compared against.</li>
+        <li>Stated who holds the count that MaxChildren is compared against
+        (<xref target="spawn-validation-sequence"/>).  -02 required the
+        comparison and named no party to perform it, so a distributed
+        deployment had no defined owner of the state and two concurrent spawns
+        could both succeed.  The Registry enforces the cap atomically; a
+        relying party's document-local count is a consistency check.</li>
+        <li>Made duplicate-member detection a requirement on the parser
+        (<xref target="document-encoding"/>), not only a property of the
+        document.  A stock JSON parser silently keeps one of two duplicates
+        and reports success, which satisfied the -02 wording while defeating
+        its purpose.</li>
+        <li>Defined scope syntax and set semantics
+        (<xref target="scope-constraint"/>).  -02 required byte comparison of
+        wire names and said nothing about scope values, so whether Read:Data
+        equalled read:data, whether array order mattered, and whether an empty
+        request satisfied the subset test were all implementation-defined.</li>
+        <li>Named the party that performs the spawn sequence and issues the
+        child certificate (<xref target="spawn-validation-sequence"/>).  -02
+        stated the issuance in the passive voice, and the only party a reader
+        would guess is the one <xref target="certificate-profile"/>
+        forbids.</li>
+        <li>Defined the value space of PermittedOperations and tied spawn to
+        the right to spawn (<xref target="static-fields"/>,
+        <xref target="two-check-rule"/>).  -02 required the field, typed it,
+        showed values in examples, and assigned no meaning to any of them.</li>
+        <li>Stated what makes a root legitimate
+        (<xref target="spawn-provenance"/>), gave an absent NotAfter a meaning
+        (<xref target="policy-document-structure"/>), gave a grant an issuance
+        instant so its TTL has an origin (<xref target="grant-structure"/>),
+        and bound a certificate's validity period to its ttl_seconds
+        (<xref target="template-issuance"/>) so that the TTL is enforced by
+        path validation.  Clarified that the bounds check of
+        <xref target="dynamic-policy-bounds"/> is independent of signature
+        validity but not prior to it.</li>
+        <li>Added threat coverage for the encodings this revision specifies
+        (<xref target="threat-coverage"/>), stated the rationale for the
+        freshness window (<xref target="replay-attacks"/>), clarified that the
+        window governs the request and not later validation
+        (<xref target="spawn-provenance"/>), and stated that what a scope
+        grants access to is outside this document
+        (<xref target="scope-constraint"/>).</li>
+        <li>Specified the signature algorithm per signer key type
+        (<xref target="signature-envelope"/>): RSASSA-PSS or ECDSA with a
+        fixed-width value, and no algorithm identifier in the envelope.  -02
+        said "raw signature value" and "SHA-256 or stronger" with no way to
+        signal which, so two implementations could not verify each other's
+        signatures.</li>
+        <li>Specified how a relying party trusts the Owner and Policy
+        Authority keys (<xref target="template-dual-signature"/>,
+        <xref target="trust-anchor-options"/>) and bound the Owner field to
+        the Owner certificate's subject.  -02 required the signatures and
+        said nothing about the keys.</li>
+        <li>Defined Relying Party, Owner, and Root Orchestrator, stated that
+        a template defines exactly one agent, and stated that the Registry
+        and its CA are one logical entity (<xref target="terminology"/>).
+        Stated that a new template version keeps its Subject and revokes
+        the prior certificate (<xref target="full-re-verification"/>), that
+        DISABLED is a Registry state reported in Check 2 rather than a CRL
+        entry (<xref target="template-lifecycle"/>), and what "authorized
+        party" means in Check 2 (<xref target="two-check-rule"/>).</li>
+        <li>Replaced the conformance certification requirement, which named
+        no certifying body, with a conformance claim
+        (<xref target="conformance-certification"/>).  Added Privacy
+        Considerations and Algorithm Agility, and the handling of a
+        compromised Owner or Policy Authority key.  Adopted the BCP 14
+        boilerplate of <xref target="RFC8174"/> and moved the document to
+        the IETF stream and the Security Area.</li>
+        <li>Hardened the profile with no allowance for prior
+        implementations, which are retained under tags.  Both certificate
+        extensions are now critical (<xref target="static-field-encoding"/>),
+        so a validator that does not implement this document refuses the
+        certificate instead of treating it as an ordinary client
+        certificate.  The key strength floor rose to 128 bits, RSA-2048 is
+        refused, EC and Ed25519 are recommended, keyUsage is restricted to
+        digitalSignature, and serial numbers require 64 bits of entropy
+        (<xref target="certificate-profile"/>).  Ed25519 joined the
+        signature algorithms.  The two-roles-one-key rule now compares keys
+        rather than signature octets, which a randomized scheme made
+        necessary (<xref target="signature-envelope"/>).  Certificate
+        lifetime is capped at seven days (<xref target="template-issuance"/>).
+        Timestamps require the Z designator and the JSON objects are
+        declared flat (<xref target="document-encoding"/>).  The Grantor's
+        Registry was named as the enforcer of MaxSpawns
+        (<xref target="grant-structure"/>).</li>
+        <li>Replaced the IANA Considerations section, which previously declared
+        no actions.  Encoding the template made a media type and a scope registry
+        necessary.</li>
+        <li>Promoted the implementation table to a top-level Implementation
+        Status section per <xref target="RFC7942"/>.</li>
+      </ul>
+    </section>
+
+    <section anchor="changes-02" numbered="true" toc="default">
+      <name>Changes since draft-tonyai-a2a-trust-01</name>
+      <t>Section numbers in this appendix are those of draft-tonyai-a2a-trust-02,
+      the revision these changes produced.  Several sections were renumbered in
+      -03; see <xref target="changes-03"/>.</t>
+      <t>
+        All changes in this revision were surfaced by building a second,
+        independent implementation of the -01 text and attacking it.  Changes are
+        described below by their effect on a conformant implementation rather
+        than by intent: where an implementation conforming to -01 must change to
+        remain conformant, this is stated plainly, because an implementer reading
+        this appendix is deciding whether re-verification is required.
+      </t>
+      <t>
+        Four changes below are breaking.  Two implementations exist at the time
+        of writing, both under the author's control; the cost of these changes is
+        at its minimum now and rises permanently once a third-party
+        implementation ships.
+      </t>
+
+      <t><strong>Security fix -- breaking.</strong></t>
+      <ul>
+        <li>
+          Section 9.6 (Signature and Hash Coverage) is new, and requires that
+          Version and Subject be inside the signed preimage.  In -01 the policy
+          version was listed in Section 9.4 as a value stored alongside the
+          signature, and the text never required the signature to cover it.  Both
+          existing implementations read it that way and neither signed the
+          version, which defeats the replay prevention that Section 9.4 assigns
+          to that field: an attacker holding no key can take a superseded but
+          validly signed policy, increment the version, and have it accepted --
+          both signatures verify, the content hash matches, and the version reads
+          as current.  Implementations MUST re-sign existing policies under the
+          new coverage.  Signatures produced under -01 do not verify under -02.
+        </li>
+      </ul>
+
+      <t><strong>Interoperability -- breaking.</strong></t>
+      <ul>
+        <li>
+          Section 9.5 (Canonicalization) is new, and normatively specifies JCS
+          (RFC 8785) as the serialization for all signatures and hashes.  -01
+          contained no canonicalization text of any kind, which made Section 9.3
+          impossible to implement interoperably: a signature is over bytes, and
+          nothing in -01 said how those bytes are produced.  The only way to
+          implement -01's dual signature was to read an existing implementation's
+          source.  JCS differs from what both current implementations do, so
+          both must change and all existing signatures and test vectors are
+          invalidated.  An existing implementation is not conformant to -02 by
+          default.
+        </li>
+        <li>
+          Section 9.4 (Dynamic Policy Document Structure) is new.  -01 required
+          the dynamic policy to be signed, hashed, stored and integrity-checked
+          without ever defining what it contains, leaving each implementer to
+          invent a field set.  Different invented sets produce different
+          signatures and different hashes for the same policy, and each
+          implementation reads the other's documents as tampered with.
+          Implementations whose field set differs from the table in Section 9.4
+          must change.
+        </li>
+      </ul>
+
+      <t><strong>New normative requirements -- additive.</strong></t>
+      <ul>
+        <li>
+          Section 6.3 (Certificate Profile) is new.  -01 mandated X.509 and
+          specified no profile: no key strength, no digest floor, and no
+          basicConstraints requirement.  Three certificates that verify under a
+          conformant X.509 validator were accepted as agent identities by an
+          implementation conforming to -01 -- one asserting cA = TRUE, one signed
+          with SHA-1, and one carrying no basicConstraints at all.  The first is
+          also a containment failure: an agent whose certificate permits it to
+          issue certificates can create children without presenting a request to
+          the CA, which removes both checks in Section 8.1 from the spawn path
+          without invalidating any signature.  Implementations already issuing
+          cA = FALSE, SHA-256, RSA-2048 leaves satisfy this section unchanged,
+          but MUST add the corresponding checks on validation.
+        </li>
+        <li>
+          Section 7.2 now states who enforces the dynamic policy bounds, when,
+          and with what result.  -01 stated the rule and named no enforcement
+          point, so an implementation that never checked it and one that checked
+          it before signature verification both read as conformant while
+          returning different results for the same document.  The bounds MUST now
+          be evaluated independently of signature validity and refused before the
+          policy is applied.
+        </li>
+      </ul>
+
+      <t><strong>Rename -- breaking.</strong></t>
+      <ul>
+        <li>
+          The Section 7.1 static field KeyUsage is renamed
+          PermittedOperations.  The field carries the operations an agent may
+          perform -- spawn, delegate, read -- and is unrelated to the X.509
+          keyUsage extension, whose values are digitalSignature, keyCertSign and
+          the rest of the RFC 5280 set.  The collision was latent while this
+          document never referred to the X.509 extension; Section 6.3 now does,
+          normatively, so a single document used one name for two unrelated
+          things.  RFC 5280 owns the name keyUsage, so the template field is the
+          one that moves.  The new name is the description this document already
+          gave the field.  Implementations MUST rename the corresponding metadata
+          field; the value space is unchanged.
+        </li>
+      </ul>
+
+      <t><strong>Removal -- breaking for any implementation reading the field.</strong></t>
+      <ul>
+        <li>
+          The ScopeInherit field is removed from the Section 7.1 static field
+          table.  It was REQUIRED in -00 and -01 with no defined value space, and
+          the value both existing implementations populate it with,
+          "strict-subset", contradicts Section 8.3 as clarified in -01, which
+          explicitly permits equality.  Neither implementation reads the value,
+          so the field conveyed no capability; Section 8.3 already determines
+          inheritance completely.  An implementation that enforced the field
+          literally would deny a child legitimately holding its parent's full
+          scope set, which is the misreading -01 was published to prevent.
+        </li>
+      </ul>
+
+      <t><strong>Non-normative.</strong></t>
+      <ul>
+        <li>
+          Section 16.7 (PKI Does Not Enforce Authorization) is new.  It states
+          that certificate validity establishes identity and not authorization,
+          that neither nameConstraints nor certificatePolicies closes that gap,
+          and that Sections 7.2 and 8.3 are therefore load-bearing implementation
+          logic rather than restatements of a guarantee the chain already
+          provides.  No behaviour changes; the omission was judged the most
+          likely to cause an implementer to build something that verifies
+          correctly and contains nothing.
+        </li>
+      </ul>
+    </section>
+
+    <section anchor="changes-01" numbered="true" toc="default">
+      <name>Changes since draft-tonyai-a2a-trust-00</name>
+      <t>Section numbers in this appendix are those of draft-tonyai-a2a-trust-01,
+      the revision these changes produced.</t>
+      <t>
+        Clarified two areas identified as ambiguous during development of a
+        reference implementation:
+      </t>
+      <ul>
+        <li>
+          Section 8.3/16.1 scope-subset language now explicitly permits
+          equality between a child's requested scope and its parent's
+          granted scope; only escalation (a superset) is prohibited. The
+          prior wording could be misread as requiring a strict/proper
+          subset, which would wrongly deny a child that legitimately needs
+          the same scope as its parent.
+        </li>
+        <li>
+          Section 12.1 revocation-check language now explicitly accepts an
+          X.509 CRL, an OCSP responder, or an equivalent revocation
+          registry, rather than implying a CRL specifically. The
+          normative requirement is that revocation state is consulted on
+          every validation, not the specific mechanism used to represent
+          it.
+        </li>
+      </ul>
+      <t>
+        Neither change alters the normative requirements themselves; both
+        make explicit what the -00 text intended. Both were surfaced by
+        building and red-teaming a conformance reference implementation
+        against the -00 text.
+      </t>
+    </section>
+  </back>
+
+</rfc>

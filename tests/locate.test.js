@@ -89,6 +89,11 @@ describe('locateValue', () => {
     expect(locateValue(TEXT, '')).toBeNull();
     expect(locateValue(TEXT, 42)).toBeNull();
   });
+
+  it('skips an occurrence that is a key and finds the value later on the same line', () => {
+    expect(locateValue('{"read:events": "read:events"}', 'read:events')).toBe(1);
+    expect(locateValue('{"read:events": 1}', 'read:events')).toBeNull();
+  });
 });
 
 describe('locateFailure — path first, then values', () => {

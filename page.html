@@ -172,7 +172,12 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
 .phase-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(206px,1fr));
   gap:7px;padding:9px 11px}
 .k-ok{color:var(--green-text);font-weight:700}
+.k-warn{color:var(--amber-text);font-weight:700}
 .k-no{color:var(--red-text);font-weight:700}
+.admin-btn.warn{border-color:var(--amber-line);color:var(--amber-text);
+  --btn-tint:color-mix(in srgb,var(--amber-line) 8%,transparent)}
+.admin-btn.warn:hover:not(:disabled){--btn-tint:color-mix(in srgb,var(--amber-line) 18%,transparent)}
+.admin-btn.warn .sec-tag{color:var(--amber-text);opacity:.8}
 
 /* ── Reference pane — tabs over the four consult-afterwards panels ──────── */
 /* The tab strip inherits .panel-title, whose justify-content:space-between
@@ -201,7 +206,6 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
   box-shadow:inset 0 2px 0 var(--accent)}
 .ref-tab .badge{font-family:var(--font);font-weight:400;font-size:10.5px;
   text-transform:none;letter-spacing:0;margin-left:6px}
-.ref-tab .badge.ok{color:var(--green-text)}
 .ref-tab .badge.bad{color:var(--red-text)}
 
 /* ── Panels ─────────────────────────────────────────────────────────────── */
@@ -244,6 +248,9 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
 .p-box.err .p-name,.p-box.err .p-sub{color:var(--red-text)}
 .p-box.skip{border-color:transparent;background:color-mix(in srgb,var(--idle-line) 10%,transparent)}
 .p-box.skip .p-name,.p-box.skip .p-label,.p-box.skip .p-sub,.p-box.skip .p-ask{color:var(--idle-text)}
+.p-box.warn{border-color:var(--amber-line);background:color-mix(in srgb,var(--amber-line) 16%,transparent)}
+.p-box.warn .p-name,.p-box.warn .p-sub{color:var(--amber-text)}
+.p-arrow.warn{color:var(--amber-line)}
 .p-box.na{border-style:dashed;border-color:var(--border-strong);
   background:color-mix(in srgb,var(--amber-line) 8%,transparent)}
 .p-box.na .p-name{color:var(--amber-text)}
@@ -351,6 +358,8 @@ a.sec:hover{color:var(--accent);border-bottom-style:solid}
 .log-row.deny .detail{font-weight:600}
 .log-row.deny:hover{background:color-mix(in srgb,var(--red-line) 22%,transparent)}
 .log-row.deny.active{box-shadow:inset 3px 0 0 var(--red-line)}
+.log-row.warn{background:color-mix(in srgb,var(--amber-line) 12%,transparent)}
+.log-row.warn .res{color:var(--amber-text)}
 .log-row.na .res{color:var(--idle-text)}
 .log-row.na .detail{color:var(--text-dim)}
 
@@ -422,6 +431,28 @@ table.report .id{word-break:break-all;color:var(--text-dim)}
 table.report .muted{color:var(--text-dim);font-size:11.5px}
 table.report tr.bad td{background:color-mix(in srgb,var(--red-line) 12%,transparent)}
 table.report tr.bad .role,table.report tr.bad .id{color:var(--red-text)}
+
+/* ── Certificate view — the shape of `openssl x509 -text` ──────────────── */
+.cert-lede{font-size:12px;line-height:1.6;color:var(--text-dim);margin:0 0 12px;max-width:110ch}
+.cert-list{display:flex;flex-direction:column;gap:12px}
+.cert-block{border:1px solid var(--border);border-radius:6px;overflow:hidden;
+  background:var(--panel-bg)}
+.cert-block.bad{border-color:var(--red-line);box-shadow:inset 3px 0 0 var(--red-line)}
+.cert-head{display:flex;align-items:baseline;gap:12px;padding:7px 11px;
+  background:color-mix(in srgb,var(--idle-line) 8%,transparent);
+  border-bottom:1px solid var(--border);flex-wrap:wrap}
+.cert-role{font-size:11px;font-weight:800;letter-spacing:.07em;color:var(--text)}
+.cert-block.bad .cert-role{color:var(--red-text)}
+.cert-id{font-size:11px;color:var(--text-dim);word-break:break-all}
+.mono{font-family:var(--font)}
+.cert-text{font-family:var(--font);font-size:11px;line-height:1.55;padding:9px 11px;
+  overflow-x:auto;color:var(--text);background:color-mix(in srgb,var(--mono-bg) 4%,var(--panel-bg))}
+.cert-line{white-space:pre;min-height:1.55em}
+.cert-line.bad-field{background:color-mix(in srgb,var(--red-line) 22%,transparent);
+  color:var(--red-text);font-weight:700;border-radius:2px}
+.cert-link{color:var(--accent);text-decoration:none;border-bottom:1px dotted currentColor}
+.cert-link:hover{border-bottom-style:solid}
+.cert-note{color:var(--text-dim)}
 
 /* The whole reference pane sits apart from the app above it. */
 #reference{background:color-mix(in srgb,var(--idle-line) 5%,var(--panel-bg));
@@ -523,7 +554,7 @@ footer a{-webkit-text-fill-color:var(--accent);color:var(--accent);
     </div>
     <div class="head-right">
       <span><span class="dot green" id="privacy-dot"></span> <span id="privacy-text">IN-BROWSER ONLY</span></span>
-      <a id="draft-link" href="https://datatracker.ietf.org/doc/draft-tonyai-a2a-trust/" target="_blank" rel="noopener">DRAFT-TONYAI-A2A-TRUST-02</a>
+      <a id="draft-link" href="https://datatracker.ietf.org/doc/draft-tonyai-a2a-trust/" target="_blank" rel="noopener">DRAFT-TONYAI-A2A-TRUST-03</a>
       <a id="src-link" href="https://github.com/tonyt68/a2a-trust-playground" target="_blank" rel="noopener">READ THE SOURCE ↗</a>
       <span id="build-stamp"></span>
     </div>
@@ -540,14 +571,16 @@ footer a{-webkit-text-fill-color:var(--accent);color:var(--accent);
     </div>
     <div class="claims">
       <span class="claim">Five certificates &mdash; a CA, two agents, two signing authorities</span>
-      <span class="claim">RSA-2048 keypairs, generated in this tab by Web&nbsp;Crypto</span>
-      <span class="claim">Signed <code>RSASSA-PKCS1-v1_5</code> with SHA-256</span>
-      <span class="claim">Real X.509 &mdash; <code>openssl verify</code> returns OK</span>
-      <span class="claim">RFC&nbsp;5280 profile &mdash; <code>cA:FALSE</code>, <code>keyCertSign</code> on the CA</span>
+      <span class="claim">P-256 keypairs, generated in this tab by Web&nbsp;Crypto (&sect;7.1: 128-bit security, EC recommended)</span>
+      <span class="claim">Certificates signed <code>ecdsa-with-SHA256</code>; envelopes signed ECDSA as fixed-width <code>r&#8214;s</code> (&sect;3.1)</span>
+      <span class="claim">Real X.509 &mdash; <code>openssl verify -ignore_critical</code> returns OK; plain <code>openssl verify</code> refuses them, by design (&sect;8.2)</span>
+      <span class="claim">The Agent Template extension, critical, carrying the nine template members as JCS (&sect;8.2)</span>
+      <span class="claim">The child carries the Agent Spawn extension: parent, timestamp, nonce, CA-attested (&sect;10.5)</span>
+      <span class="claim">RFC&nbsp;5280 profile &mdash; <code>cA:FALSE</code>, <code>keyUsage</code> digitalSignature only, 160-bit serials, <code>keyCertSign</code> on the CA</span>
+      <span class="claim"><code>cRLDistributionPoints</code> on every leaf, pointing at a <code>.invalid</code> host (&sect;14.4)</span>
       <span class="claim">Name-constrained &mdash; this CA cannot issue for a real hostname</span>
-      <span class="claim">Agent identity is carried in the certificate subject</span>
-      <span class="claim">Owner and Policy Authority each hold their own CA-issued certificate</span>
-      <span class="claim">24-hour validity window, and expiry is enforced</span>
+      <span class="claim">Validity bound to each template&rsquo;s TTL: 24&nbsp;h parent, 12&nbsp;h child, and enforced (&sect;9.3)</span>
+      <span class="claim">Owner and Policy Authority each hold their own CA-issued certificate; the Owner&rsquo;s CN is the template owner (&sect;9.2)</span>
       <span class="claim">The CA is self-signed and in nobody&rsquo;s trust store</span>
     </div>
     <div class="howto-do"><b>Edit</b> the document on the left or press a modify button
@@ -581,7 +614,7 @@ footer a{-webkit-text-fill-color:var(--accent);color:var(--accent);
 
     <!-- ── VALIDATE ──────────────────────────────────────────────────────── -->
     <div class="panel">
-      <div class="panel-title"><span>VALIDATE — NINE CHECKS, FIVE PHASES</span>
+      <div class="panel-title"><span>VALIDATE — NINE CHECKS, SEVEN STEPS</span>
         <span class="hint">click a refusal to jump to the field</span></div>
       <div id="controls-validate"></div>
       <div id="pipeline" aria-label="validation flow"></div>
@@ -593,8 +626,10 @@ footer a{-webkit-text-fill-color:var(--accent);color:var(--accent);
     <div class="panel-title"><span>TRY IT</span></div>
     <p class="section-lede">Each button edits the document, jumps to the line it changed,
       then re-validates. <b class="k-ok">Green</b> makes a change the draft permits &mdash; the
-      chain stays valid. <b class="k-no">Red</b> makes one it refuses, and the result names the
-      clause. Grouped by the step of the chain each one exercises.</p>
+      chain stays valid. <b class="k-warn">Amber</b> trips a SHOULD: reported, not refused.
+      <b class="k-no">Red</b> makes a change it refuses, and the result names the clause. The
+      REGISTRY group asks the Registry to mint something it must not; nothing is issued and the
+      document is untouched. Grouped by the step of the chain each one exercises.</p>
     <div id="controls-phases"></div>
   </div>
 

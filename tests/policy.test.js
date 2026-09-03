@@ -1,553 +1,302 @@
 /**
- * Stages 4-6 — dual signature (§9.3), field guard, required fields.
+ * §11 — dual-signed policy updates in the §3.1 envelope, stages 4-6.
  *
- * Acceptance criteria 6 and 7:
- *   AC-6  can_spawn and max_children cannot be altered by a policy update
- *   AC-7  a single signature is always insufficient; both must verify
- *
- * Signatures here are made with the real fixture keys and verified through the
- * same path the page uses, so a canonicalisation drift would fail these rather
- * than surfacing later as a mysterious crypto error.
+ * The seed document is the fixture: a chain whose child has a dual-signed
+ * policy. Each test bends one thing and asserts the SPECIFIC refusal.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { readFileSync, existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { DenyError } from '../src/errors.js';
-import { extractIdentityFields, extractPolicyFields, canonicalize } from '../src/canonical.js';
-import { privateKeyFromPem, signCanonical } from '../src/crypto-sign.js';
+import { buildDefaultDocument } from '../src/defaults.js';
 import {
-  IMMUTABLE_CERT_FIELDS, MODIFIABLE_POLICY_FIELDS, REQUIRED_POLICY_FIELDS, assertFieldGuard, assertOwnership, assertPolicyIntegrity, assertRequiredFields, assertWithinTemplateBounds, isPolicyUpdate, policyContentHash, validatePolicyUpdate,
+  validatePolicyUpdate, assertFieldGuard, assertEnvelope, IMMUTABLE_CERT_FIELDS, isPolicyUpdate,
+  assertRequiredFields, assertWithinTemplateBounds, assertOwnership, assertPolicyIntegrity,
 } from '../src/policy.js';
+import { signEnvelope, privateKeyFromPem, contentHash, signBody } from '../src/crypto-sign.js';
+import { parseCertificate, parseTemplateExtension } from '../src/x509.js';
+import { childOf, parentOf, templateOf, resignPolicy, issueRaw } from '../src/scenarios.js';
+import { DenyError } from '../src/errors.js';
 
-const dir = fileURLToPath(new URL('./fixtures/certs/', import.meta.url));
-const read = (f) => readFileSync(dir + f, 'utf8');
+let base, now;
+beforeAll(async () => { now = new Date(); base = await buildDefaultDocument({ now }); }, 30_000);
+const clone = () => JSON.parse(JSON.stringify(base));
 
-const AGENT_B = 'c669186f-a84b-4d7a-81f3-05880df87114';
-const AGENT_A = '8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa';
-
-/** Mirrors the reference implementation's agent-b metadata shape. */
-const EXISTING_CERT = Object.freeze({
-  subject: AGENT_B, agent_id: AGENT_B, agent_uuid: AGENT_B,
-  issuer: 'A2A-Trust-Playground-CA', owner: 'owner@example.com', org_id: 'tonyai-org',
-  permitted_operations: ['write', 'spawn', 'delegate'], allowed_scopes: ['write:events'],
-  can_spawn: [AGENT_A], max_children: 5,
-  policy_ref: 'policy-store/agent-b/current', ttl_seconds: 86400,
-  template_version: '1.0', state: 'ACTIVE',
-});
-
-/**
- * A complete dynamic policy document, per `-02` §9.4.
- *
- * Previously copied from the reference implementation's
- * tests/test_policy_signatures.py, which was the only available definition while
- * `-01` left the structure unspecified. §9.4 now defines it, so the fixture is
- * built from the draft's field table instead of from another codebase's tests.
- */
-const VALID_POLICY_DOC = Object.freeze({
-  subject: AGENT_B,
-  owner: 'owner@example.com',
-  org_id: 'tonyai-org',
-  scopes: ['write:events'],
-  version: 2,
-  issued_at: '2026-06-06T20:00:00Z',
-});
-
-let ownerCert, paCert, ownerKey, paKey;
-beforeAll(async () => {
-  if (!existsSync(dir + 'owner.crt')) throw new Error('run `pnpm fixtures`');
-  ownerCert = read('owner.crt');
-  paCert = read('pa.crt');
-  ownerKey = await privateKeyFromPem(read('owner.key'));
-  paKey = await privateKeyFromPem(read('pa.key'));
-});
-
-/** Build a correctly dual-signed update. Overrides let each test break one thing. */
-async function signedUpdate(overrides = {}) {
-  const policyDoc = { ...VALID_POLICY_DOC, ...(overrides.policyDoc ?? {}) };
-  const existing = { ...EXISTING_CERT, ...(overrides.existingCert ?? {}) };
-  const doc = {
-    policy_update: true,
-    policy_doc: policyDoc,
-    existing_cert: existing,
-    owner_sig: await signCanonical(canonicalize(extractIdentityFields(existing)), ownerKey),
-    pa_sig: await signCanonical(canonicalize(extractPolicyFields(policyDoc)), paKey),
-  };
-  return { ...doc, ...(overrides.doc ?? {}) };
+function templatesOf(d) {
+  const m = new Map();
+  for (const n of d.chain.filter((x) => x.role === 'agent')) {
+    const c = parseCertificate(n.cert_pem);
+    m.set(n.metadata.agent_id, { template: parseTemplateExtension(c), notAfter: c.notAfter.value });
+  }
+  return m;
 }
-
-const run = (document) => validatePolicyUpdate({ document, ownerCertPem: ownerCert, paCertPem: paCert });
-
-async function denies(code, fn) {
-  let thrown;
-  try { await fn(); } catch (e) { thrown = e; }
-  expect(thrown, 'expected a DenyError, nothing was thrown').toBeDefined();
-  expect(thrown, `threw ${thrown?.constructor?.name}: ${thrown?.message}`).toBeInstanceOf(DenyError);
-  expect(thrown.code).toBe(code);
-}
-
-describe('field sets match policy_field_guard.py', () => {
-  it('can_spawn and max_children are immutable identity (AC-6)', () => {
-    for (const f of ['can_spawn', 'max_children']) {
-      expect(IMMUTABLE_CERT_FIELDS.has(f)).toBe(true);
-      expect(MODIFIABLE_POLICY_FIELDS.has(f)).toBe(false);
-    }
-  });
-  it('requires the §9.4 REQUIRED fields', () => {
-    expect([...REQUIRED_POLICY_FIELDS].sort()).toEqual(
-      ['issued_at', 'org_id', 'owner', 'scopes', 'subject', 'version']);
-  });
+const run = (d, extra = {}) => validatePolicyUpdate({
+  document: d, templates: templatesOf(d), ownerCertPem: d.authorities.owner.cert_pem,
+  paCertPem: d.authorities.pa.cert_pem, now, ...extra,
 });
+const refuses = async (code, promise) => {
+  let caught = null;
+  try { await promise; } catch (e) { caught = e; }
+  expect(caught, 'expected a refusal').toBeInstanceOf(DenyError);
+  expect(caught.code).toBe(code);
+  return caught;
+};
 
-describe('not a policy update — passes through', () => {
-  it('a plain chain document is not applicable', async () => {
-    const r = await run({ chain: [] });
-    expect(r.applicable).toBe(false);
-    expect(r.detail).toBe('not a policy update');
-  });
-  it('isPolicyUpdate keys off the policy_update field', () => {
-    expect(isPolicyUpdate({ policy_update: true })).toBe(true);
-    expect(isPolicyUpdate({ policy_update: false })).toBe(true); // presence, not truthiness
-    expect(isPolicyUpdate({})).toBe(false);
-    expect(isPolicyUpdate(null)).toBe(false);
-  });
-});
-
-describe('the happy path — both phases verify', () => {
-  it('accepts a correctly dual-signed update', async () => {
-    const r = await run(await signedUpdate());
+describe('the seed', () => {
+  it('is a policy update and passes', async () => {
+    const d = clone();
+    expect(isPolicyUpdate(d)).toBe(true);
+    const r = await run(d);
     expect(r.applicable).toBe(true);
-    expect(r.detail).toContain('Phase 1');
-    expect(r.detail).toContain('Phase 2');
+    expect(r.subject).toBe(childOf(d).metadata.agent_id);
   });
-
-  it('reports exactly which fields each signature covered', async () => {
-    const { signed } = await run(await signedUpdate());
-    // Phase 1 covers identity; note can_spawn and max_children are in it.
-    expect(signed.identity_fields).toContain('can_spawn');
-    expect(signed.identity_fields).toContain('max_children');
-    expect(signed.identity_fields).toContain('agent_uuid');
-    // Phase 2 covers policy only — and must NOT contain the identity fields.
-    expect(signed.policy_fields).toContain('scopes');
-    expect(signed.policy_fields).not.toContain('can_spawn');
-    expect(signed.policy_fields).not.toContain('agent_uuid');
-    // `owner` is the one field in both sets, matching the reference.
-    expect(signed.identity_fields).toContain('owner');
-    expect(signed.policy_fields).toContain('owner');
+  it('a chain without a policy is not applicable — a PASS, not a refusal', async () => {
+    const d = clone(); delete d.policy;
+    expect((await run(d)).applicable).toBe(false);
   });
-
-  it('signs the canonical form, not the raw document', async () => {
-    const { signed } = await run(await signedUpdate());
-    expect(signed.policy_canonical).not.toContain(', ');   // compact separators
-    expect(signed.policy_canonical.startsWith('{"issued_at":')).toBe(true);
+  it('reports the stages in the reference order: 5, 6, then 4', async () => {
+    const seen = [];
+    await run(clone(), { onStage: (n) => seen.push(n) });
+    expect(seen).toEqual([5, 6, 4]);
   });
 });
 
-describe('AC-7 — one signature is never enough', () => {
+describe('§3.1 — the envelope', () => {
+  it('refuses a member the draft does not define', async () => {
+    const d = clone(); d.policy.signature = 'x';
+    await refuses('ERR_ENVELOPE_MEMBER', run(d));
+  });
+  it('refuses a policy envelope with no content_hash — §11.7 stores one', async () => {
+    const d = clone(); delete d.policy.content_hash;
+    await refuses('ERR_CONTENT_HASH', run(d));
+  });
+  it('refuses an envelope that is not an object', () => {
+    expect(() => assertEnvelope('x', { requireHash: true })).toThrow(DenyError);
+    expect(() => assertEnvelope({ owner_sig: 'a', pa_sig: 'b', content_hash: 'c' }, { requireHash: true })).toThrow(DenyError);
+  });
+});
+
+describe('§11.3 — one signature is never enough', () => {
   it('refuses when both signatures are absent', async () => {
-    const doc = await signedUpdate({ doc: { owner_sig: null, pa_sig: null } });
-    await denies('ERR_SINGLE_SIGNATURE', () => run(doc));
+    const d = clone(); d.policy.owner_sig = null; d.policy.pa_sig = null;
+    await refuses('ERR_SINGLE_SIGNATURE', run(d));
   });
-
   it('refuses with owner_sig only', async () => {
-    const doc = await signedUpdate({ doc: { pa_sig: null } });
-    await denies('ERR_PA_SIG_MISSING', () => run(doc));
+    const d = clone(); d.policy.pa_sig = null;
+    await refuses('ERR_PA_SIG_MISSING', run(d));
   });
-
   it('refuses with pa_sig only', async () => {
-    const doc = await signedUpdate({ doc: { owner_sig: null } });
-    await denies('ERR_OWNER_SIG_MISSING', () => run(doc));
+    const d = clone(); d.policy.owner_sig = '';
+    await refuses('ERR_OWNER_SIG_MISSING', run(d));
   });
-
-  it('refuses when one key signs both roles', async () => {
-    // The A20 red-team case: same key used for owner and PA.
-    const policyDoc = { ...VALID_POLICY_DOC };
-    const sig = await signCanonical(canonicalize(extractPolicyFields(policyDoc)), paKey);
-    await denies('ERR_OWNER_SIG_INVALID', () => run({
-      policy_update: true, policy_doc: policyDoc, existing_cert: EXISTING_CERT,
-      owner_sig: sig, pa_sig: sig,
-    }));
+  it('refuses a tampered Owner signature and a tampered PA signature, each by name', async () => {
+    let d = clone(); const o = Buffer.from(d.policy.owner_sig, 'base64'); o[3] ^= 1; d.policy.owner_sig = o.toString('base64');
+    await refuses('ERR_OWNER_SIG_INVALID', run(d));
+    d = clone(); const p = Buffer.from(d.policy.pa_sig, 'base64'); p[3] ^= 1; d.policy.pa_sig = p.toString('base64');
+    await refuses('ERR_PA_SIG_INVALID', run(d));
   });
-
-  it('refuses a tampered PA signature (A18)', async () => {
-    const doc = await signedUpdate();
-    const flipped = Buffer.from(doc.pa_sig, 'base64');
-    flipped[0] ^= 0xff;
-    doc.pa_sig = flipped.toString('base64');
-    await denies('ERR_PA_SIG_INVALID', () => run(doc));
-  });
-
-  it('refuses a tampered owner signature', async () => {
-    const doc = await signedUpdate();
-    const flipped = Buffer.from(doc.owner_sig, 'base64');
-    flipped[0] ^= 0xff;
-    doc.owner_sig = flipped.toString('base64');
-    await denies('ERR_OWNER_SIG_INVALID', () => run(doc));
-  });
-
   it('refuses a signature that is not base64', async () => {
-    const doc = await signedUpdate({ doc: { pa_sig: 'not base64!' } });
-    await denies('ERR_PA_SIG_INVALID', () => run(doc));
+    const d = clone(); d.policy.pa_sig = 'not base64!!';
+    await refuses('ERR_PA_SIG_INVALID', run(d));
   });
-
-  it('refuses when the policy document is altered after signing', async () => {
-    // Altered inside the §7.2 ceiling, so the signature is what refuses it.
-    const doc = await signedUpdate();
-    doc.policy_doc.issued_at = '2030-01-01T00:00:00Z';  // altered after the PA signed
-    await denies('ERR_PA_SIG_INVALID', () => run(doc));
+  it('refuses a DER-encoded signature as an encoding error (§3.1)', async () => {
+    const d = clone(); d.policy.owner_sig = Buffer.alloc(70, 1).toString('base64');
+    await refuses('ERR_SIGNATURE_ALGORITHM', run(d));
   });
-
-  it('refuses when the existing certificate identity is altered after signing', async () => {
-    const doc = await signedUpdate();
-    doc.existing_cert.agent_uuid = AGENT_A;          // swap identity under the owner sig
-    await denies('ERR_OWNER_SIG_INVALID', () => run(doc));
+  it('refuses when the body is altered after signing', async () => {
+    const d = clone(); d.policy.body.scopes = [];
+    d.policy.content_hash = await contentHash(d.policy.body);
+    await refuses('ERR_OWNER_SIG_INVALID', run(d));
   });
-
-  it('refuses when existing_cert is absent — Phase 1 has nothing to verify', async () => {
-    const doc = await signedUpdate({ doc: { existing_cert: null } });
-    await denies('ERR_OWNER_SIG_INVALID', () => run(doc));
+  it('the -02 replay is closed: an Owner signature from another policy on the same agent does not verify (§11.8)', async () => {
+    // Under -02 owner_sig covered the certificate's identity fields, so one
+    // valid owner_sig served every later policy on that agent. Under -03 it
+    // covers the body, so a stale one is specific to the body it signed.
+    const d = clone();
+    const ownerKey = await privateKeyFromPem(d.authorities.owner.key_pem);
+    const stale = await signBody({ ...d.policy.body, version: 1, scopes: [] }, ownerKey);
+    d.policy.owner_sig = stale;
+    await refuses('ERR_OWNER_SIG_INVALID', run(d));
+  });
+  it('refuses when one key holds both roles, comparing KEYS not signature octets (§3.1)', async () => {
+    const d = clone();
+    d.authorities.pa = { ...d.authorities.owner };
+    const key = await privateKeyFromPem(d.authorities.owner.key_pem);
+    d.policy = await signEnvelope(d.policy.body, key, key, { withHash: true });
+    expect(d.policy.owner_sig).not.toBe(d.policy.pa_sig);   // ECDSA is randomized: octets differ
+    await refuses('ERR_SINGLE_SIGNATURE', run(d));
   });
 });
 
-describe('AC-6 — the field guard makes the split real', () => {
-  for (const field of ['can_spawn', 'max_children', 'agent_id', 'agent_uuid', 'allowed_scopes', 'cert_serial']) {
-    it(`refuses a policy update touching ${field}`, async () => {
-      const doc = await signedUpdate({ policyDoc: { [field]: field === 'max_children' ? 999 : ['x'] } });
-      await denies('ERR_IMMUTABLE_FIELD', () => run(doc));
+describe('§11.4 — the field guard makes the split real', () => {
+  it('knows which template members are immutable', () => {
+    expect([...IMMUTABLE_CERT_FIELDS].sort()).toEqual(['allowed_scopes', 'can_spawn', 'max_children',
+      'permitted_operations', 'policy_ref', 'ttl_seconds']);
+  });
+  for (const field of ['can_spawn', 'max_children', 'allowed_scopes', 'permitted_operations', 'ttl_seconds', 'policy_ref']) {
+    it(`refuses a policy touching ${field}`, async () => {
+      const d = clone(); d.policy.body[field] = field === 'max_children' || field === 'ttl_seconds' ? 1 : [];
+      await refuses('ERR_IMMUTABLE_FIELD', run(d));
     });
   }
-
-  it('names every offending field, sorted', async () => {
-    let thrown;
-    try {
-      await run(await signedUpdate({ policyDoc: { max_children: 99, can_spawn: [] } }));
-    } catch (e) { thrown = e; }
-    expect(thrown.detail).toContain('can_spawn');
-    expect(thrown.detail).toContain('max_children');
-    expect(thrown.detail).toContain('new certificate');
+  it('refuses an envelope member inside the body — it would be inside its own preimage (§11.6)', async () => {
+    const d = clone(); d.policy.body.content_hash = 'x';
+    const e = await refuses('ERR_UNKNOWN_POLICY_FIELD', run(d));
+    expect(e.detail).toMatch(/preimage/);
   });
-
   it('refuses unknown fields rather than ignoring them', async () => {
-    const doc = await signedUpdate({ policyDoc: { surprise: 'value' } });
-    await denies('ERR_UNKNOWN_POLICY_FIELD', () => run(doc));
+    const d = clone(); d.policy.body.description = 'x';
+    await refuses('ERR_UNKNOWN_POLICY_FIELD', run(d));
   });
-
-  it('runs the field guard BEFORE signature verification, as the reference does', async () => {
-    // Both broken: the field guard must be what is reported.
-    const doc = await signedUpdate({ policyDoc: { can_spawn: ['x'] } });
-    doc.pa_sig = 'AAAA';
-    await denies('ERR_IMMUTABLE_FIELD', () => run(doc));
+  it('names every offending field, sorted', () => {
+    let e; try { assertFieldGuard({ max_children: 1, can_spawn: [] }); } catch (x) { e = x; }
+    expect(e.detail).toMatch(/can_spawn, max_children/);
   });
-
-  it('accepts every modifiable field on its own', () => {
-    for (const f of MODIFIABLE_POLICY_FIELDS) {
-      expect(() => assertFieldGuard({ [f]: 'x' }), f).not.toThrow();
-    }
+  it('runs the field guard BEFORE signature verification', async () => {
+    const d = clone(); d.policy.body.can_spawn = []; d.policy.pa_sig = 'junk';
+    await refuses('ERR_IMMUTABLE_FIELD', run(d));
   });
-
-  it('rejects a non-object policy_doc', () => {
-    for (const bad of [null, 'x', 42, ['a']]) {
-      expect(() => assertFieldGuard(bad)).toThrow(DenyError);
-    }
+  it('refuses a nested value — bodies are flat (§3)', async () => {
+    const d = clone(); d.policy.body.scopes = [{ read: true }];
+    await refuses('ERR_OBJECT_NOT_FLAT', run(d));
   });
 });
 
-describe('stage 6 — required fields', () => {
-  for (const field of REQUIRED_POLICY_FIELDS) {
-    it(`refuses an update missing ${field}`, async () => {
-      const policyDoc = { ...VALID_POLICY_DOC };
-      delete policyDoc[field];
-      const doc = {
-        policy_update: true, policy_doc: policyDoc, existing_cert: EXISTING_CERT,
-        owner_sig: await signCanonical(canonicalize(extractIdentityFields(EXISTING_CERT)), ownerKey),
-        pa_sig: await signCanonical(canonicalize(extractPolicyFields(policyDoc)), paKey),
-      };
-      await denies('ERR_REQUIRED_FIELD', () => run(doc));
+describe('§11.4 — required fields and their types', () => {
+  for (const field of ['subject', 'owner', 'org_id', 'scopes', 'version', 'issued_at']) {
+    it(`refuses a policy missing ${field}`, async () => {
+      const d = clone(); delete d.policy.body[field];
+      await refuses('ERR_REQUIRED_FIELD', run(d));
     });
   }
-
-  it('names what is missing', () => {
-    let thrown;
-    try { assertRequiredFields({ owner: 'o' }); } catch (e) { thrown = e; }
-    expect(thrown.detail).toContain('issued_at');
+  it('refuses an issued_at with an offset (§3)', async () => {
+    const d = clone(); d.policy.body.issued_at = '2026-09-03T00:00:00+00:00';
+    await refuses('ERR_TIMESTAMP_FORMAT', run(d));
   });
-
-  it('runs after the field guard', async () => {
-    // Missing required field AND an illegal field: field guard wins.
-    const doc = await signedUpdate({ policyDoc: { can_spawn: [] } });
-    delete doc.policy_doc.owner;
-    await denies('ERR_IMMUTABLE_FIELD', () => run(doc));
+  it('refuses a scope outside the §10.3 syntax', async () => {
+    const d = clone(); d.policy.body.scopes = ['Read:Events'];
+    await refuses('ERR_SCOPE_SYNTAX', run(d));
   });
 });
 
-/**
- * §7.2 Dynamic Policy Bounds, §9.2 Ownership, §9.4 Policy Change Sequence —
- * verified against the draft-tonyai-a2a-trust-01 text, not against the PoC.
- *
- * The two-lane model (§9.1): the template certificate is the guardrail and the
- * dynamic policy chooses how and which WITHIN it. A dual signature authorises a
- * change; it does not raise the ceiling. Raising the ceiling means a new
- * certificate — a different signer and a different audit trail.
- */
-describe('§7.2 — dynamic policy is bounded by the static template', () => {
-  const ceiling = ['read:events', 'write:events'];
-  const template = { ...EXISTING_CERT, allowed_scopes: ceiling, can_spawn: [AGENT_A] };
-
-  async function update(policyOverrides) {
-    const policyDoc = {
-      subject: AGENT_B, owner: 'owner@example.com', org_id: 'tonyai-org',
-      version: 2, issued_at: '2026-06-06T20:00:00Z', ...policyOverrides,
-    };
-    return {
-      policy_update: true, policy_doc: policyDoc, existing_cert: template,
-      owner_sig: await signCanonical(canonicalize(extractIdentityFields(template)), ownerKey),
-      pa_sig: await signCanonical(canonicalize(extractPolicyFields(policyDoc)), paKey),
-    };
-  }
-
-  it('permits narrowing within the ceiling', async () => {
-    const r = await run(await update({ scopes: ['read:events'] }));
-    expect(r.applicable).toBe(true);
+describe('§11.2 — only the template owner, in the template organization, for the template subject', () => {
+  it('refuses a different owner, even correctly signed', async () => {
+    const d = clone(); d.policy.body.owner = 'attacker@example.com'; await resignPolicy(d);
+    await refuses('ERR_OWNER_MISMATCH', run(d));
   });
-
-  it('permits exactly the ceiling', async () => {
-    expect((await run(await update({ scopes: ceiling }))).applicable).toBe(true);
+  it('refuses a different organization', async () => {
+    const d = clone(); d.policy.body.org_id = 'other-org'; await resignPolicy(d);
+    await refuses('ERR_ORG_MISMATCH', run(d));
   });
-
-  it('permits an empty grant — a policy may remove authority', async () => {
-    expect((await run(await update({ scopes: [] }))).applicable).toBe(true);
+  it('refuses a subject that is not in the chain', async () => {
+    const d = clone(); d.policy.body.subject = '019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d'; await resignPolicy(d);
+    await refuses('ERR_SUBJECT_UNKNOWN', run(d));
   });
-
-  it('REFUSES a grant beyond AllowedScopes, despite two valid signatures', async () => {
-    let thrown;
-    try { await run(await update({ scopes: ['admin:all'] })); } catch (e) { thrown = e; }
-    expect(thrown.code).toBe('ERR_POLICY_EXCEEDS_TEMPLATE');
-    expect(thrown.section).toBe('7.2');
-    expect(thrown.detail).toContain('admin:all');
-    expect(thrown.detail).toContain('beyond template AllowedScopes');
+  it('accepts a policy for the PARENT — bounds are then the parent’s', async () => {
+    const d = clone(); d.policy.body.subject = parentOf(d).metadata.agent_id; d.policy.body.scopes = ['write:events'];
+    await resignPolicy(d);
+    expect((await run(d)).subject).toBe(parentOf(d).metadata.agent_id);
   });
-
-  it('REFUSES a partial overreach — one scope past the ceiling taints the update', async () => {
-    await denies('ERR_POLICY_EXCEEDS_TEMPLATE', async () =>
-      run(await update({ scopes: ['read:events', 'admin:all'] })));
-  });
-
-  it('refuses when the template declares no AllowedScopes to bound against', async () => {
-    const bare = { ...template };
-    delete bare.allowed_scopes;
-    const policyDoc = { subject: AGENT_B, owner: 'owner@example.com', org_id: 'tonyai-org',
-      scopes: ['read:events'], version: 2, issued_at: '2026-06-06T20:00:00Z' };
-    // Real signatures, so the run reaches the bounds check rather than stopping
-    // at stage 4.
-    const doc = {
-      policy_update: true, policy_doc: policyDoc, existing_cert: bare,
-      owner_sig: await signCanonical(canonicalize(extractIdentityFields(bare)), ownerKey),
-      pa_sig: await signCanonical(canonicalize(extractPolicyFields(policyDoc)), paKey),
-    };
-    await denies('ERR_POLICY_EXCEEDS_TEMPLATE', () => run(doc));
-  });
-
-  it('checks the ceiling AFTER the signatures, per §9.4 step 5', async () => {
-    // §9.4 step 5 lists the runtime order: "both signatures, version currency,
-    // hash integrity, and template bounds compliance". A document that is both
-    // unsigned AND over-broad reports the signature failure, because
-    // authenticity is established first.
-    const doc = await update({ scopes: ['admin:all'] });
-    doc.pa_sig = 'AAAA';
-    await denies('ERR_PA_SIG_INVALID', () => run(doc));
-  });
-
-  it('refuses a CORRECTLY SIGNED update that exceeds the ceiling', async () => {
-    // The §7.2 case that matters: every signature verifies, and it is still
-    // refused. Two valid signatures do not raise the ceiling.
-    const doc = await update({ scopes: ['admin:all'] });
-    await denies('ERR_POLICY_EXCEEDS_TEMPLATE', () => run(doc));
-  });
-
-  it('assertWithinTemplateBounds refuses spawn targets beyond CanSpawn', () => {
-    // Unreachable through the field guard, which refuses can_spawn outright.
-    // Kept as defence in depth if that guard is ever relaxed to allow narrowing.
-    let thrown;
-    try {
-      assertWithinTemplateBounds({ spawn_targets: [AGENT_B] }, { allowed_scopes: [], can_spawn: [AGENT_A] });
-    } catch (e) { thrown = e; }
-    expect(thrown.code).toBe('ERR_SPAWN_EXCEEDS_TEMPLATE');
-    expect(thrown.section).toBe('7.2');
-  });
-
-  it('permits a policy naming a subset of CanSpawn', () => {
-    expect(() => assertWithinTemplateBounds(
-      { spawn_targets: [AGENT_A] }, { allowed_scopes: [], can_spawn: [AGENT_A, AGENT_B] })).not.toThrow();
+  it('refuses when the Owner certificate does not name the template owner (§9.2)', async () => {
+    const d = clone();
+    await issueRaw(d, childOf(d), { template: { owner: 'another-owner' } });
+    d.policy.body.owner = 'another-owner'; await resignPolicy(d);
+    await refuses('ERR_OWNER_CERT_MISMATCH', run(d));
   });
 });
 
-describe('§9.2 — only the template owner may submit a policy change', () => {
-  async function update(policyOverrides, templateOverrides = {}) {
-    const template = { ...EXISTING_CERT, ...templateOverrides };
-    const policyDoc = {
-      subject: AGENT_B, org_id: 'tonyai-org', scopes: ['write:events'],
-      version: 2, owner: 'owner@example.com',
-      issued_at: '2026-06-06T20:00:00Z', ...policyOverrides,
-    };
-    return {
-      policy_update: true, policy_doc: policyDoc, existing_cert: template,
-      owner_sig: await signCanonical(canonicalize(extractIdentityFields(template)), ownerKey),
-      pa_sig: await signCanonical(canonicalize(extractPolicyFields(policyDoc)), paKey),
-    };
-  }
-
-  it('accepts the template owner', async () => {
-    expect((await run(await update({}))).applicable).toBe(true);
+describe('§11.4 / §11.6 — version, hash, lifetime', () => {
+  it('accepts a correct content hash and refuses a wrong one', async () => {
+    const d = clone(); d.policy.content_hash = '0'.repeat(64);
+    await refuses('ERR_CONTENT_HASH', run(d));
   });
-
-  it('REFUSES a different owner, even with two valid signatures', async () => {
-    // A valid Owner Authority signature proves a key was used. It does not prove
-    // that key speaks for THIS template's owner.
-    let thrown;
-    try { await run(await update({ owner: 'attacker@example.com' })); } catch (e) { thrown = e; }
-    expect(thrown.code).toBe('ERR_OWNER_MISMATCH');
-    expect(thrown.section).toBe('9.2');
+  it('refuses replaying an older version over the version in force', async () => {
+    const d = clone(); d.current_policy_version = 2;
+    await refuses('ERR_POLICY_VERSION', run(d));
   });
-
-  /**
-   * The key must be DELETED, not set to undefined: canonicalize refuses to
-   * serialise undefined (Python's json.dumps has no equivalent), so an override
-   * of `{owner: undefined}` throws while building the fixture rather than
-   * reaching the validator. That refusal is correct — it just is not this test.
-   */
-  async function updateWithout(field) {
-    const template = { ...EXISTING_CERT };
-    delete template[field];
-    const policyDoc = {
-      subject: AGENT_B, org_id: 'tonyai-org', scopes: ['write:events'],
-      version: 2, owner: 'owner@example.com',
-      issued_at: '2026-06-06T20:00:00Z',
-    };
-    return {
-      policy_update: true, policy_doc: policyDoc, existing_cert: template,
-      owner_sig: await signCanonical(canonicalize(extractIdentityFields(template)), ownerKey),
-      pa_sig: await signCanonical(canonicalize(extractPolicyFields(policyDoc)), paKey),
-    };
-  }
-
-  it('refuses when the template establishes no Owner', async () => {
-    const doc = await updateWithout('owner');
-    await denies('ERR_OWNER_MISMATCH', () => run(doc));
+  it('rewriting the version breaks BOTH signatures (§11.6)', async () => {
+    const d = clone(); d.policy.body.version = 99; d.policy.content_hash = await contentHash(d.policy.body);
+    await refuses('ERR_OWNER_SIG_INVALID', run(d));
   });
-
-  it('refuses when the template establishes no OrgID', async () => {
-    const doc = await updateWithout('org_id');
-    await denies('ERR_ORG_MISMATCH', () => run(doc));
+  it('refuses a non-positive, non-integer or string version — before any signature is checked', async () => {
+    for (const v of [0, -1, '2']) {
+      const d = clone(); d.policy.body.version = v;
+      await refuses('ERR_POLICY_VERSION', run(d));
+    }
+    const d = clone(); d.policy.body.version = 1.5;
+    await refuses('ERR_OBJECT_NOT_FLAT', run(d));
+  });
+  it('refuses a NotAfter later than the certificate’s notAfter', async () => {
+    const d = clone(); d.policy.body.not_after = '2099-01-01T00:00:00Z'; await resignPolicy(d);
+    await refuses('ERR_POLICY_EXPIRED', run(d));
+  });
+  it('refuses a policy presented after its NotAfter', async () => {
+    const d = clone(); d.policy.body.not_after = new Date(now.getTime() + 60_000).toISOString(); await resignPolicy(d);
+    await refuses('ERR_POLICY_EXPIRED', run(d, { now: new Date(now.getTime() + 120_000) }));
+  });
+  it('refuses a policy presented after the certificate it governs has expired', async () => {
+    await refuses('ERR_POLICY_EXPIRED', run(clone(), { now: new Date(now.getTime() + 2 * 86400_000) }));
   });
 });
 
-describe('§9.4 — version currency and content-hash integrity', () => {
-  /**
-   * The envelope travels on the DOCUMENT, not inside policy_doc. §9.4 describes
-   * "storage with dual signature, version, timestamp, and content hash" — those
-   * are properties of the stored record. Putting them in policy_doc made the
-   * reference implementation reject the whole update as containing unknown
-   * fields, which the round-trip harness caught.
-   */
-  async function update(policyOverrides, docOverrides = {}) {
-    const policyDoc = {
-      subject: AGENT_B, org_id: 'tonyai-org', scopes: ['write:events'],
-      version: 2, owner: 'owner@example.com',
-      issued_at: '2026-06-06T20:00:00Z', ...policyOverrides,
-    };
-    return {
-      policy_update: true, policy_doc: policyDoc, existing_cert: EXISTING_CERT,
-      owner_sig: await signCanonical(canonicalize(extractIdentityFields(EXISTING_CERT)), ownerKey),
-      pa_sig: await signCanonical(canonicalize(extractPolicyFields(policyDoc)), paKey),
-      ...docOverrides,
-    };
-  }
-
-  it('accepts a correct content hash', async () => {
-    const policyDoc = { subject: AGENT_B, org_id: 'tonyai-org', scopes: ['write:events'],
-      version: 2, owner: 'owner@example.com', issued_at: '2026-06-06T20:00:00Z' };
-    const hash = await policyContentHash(policyDoc);
-    const doc = await update({}, { policy_content_hash: hash, policy_version: 2 });
-    expect((await run(doc)).applicable).toBe(true);
-  });
-
-  it('REFUSES a content hash that does not match the document', async () => {
-    const doc = await update({}, { policy_content_hash: 'a'.repeat(64) });
-    await denies('ERR_CONTENT_HASH', () => run(doc));
-  });
-
-  it('REFUSES replaying an older version over a newer stored one', async () => {
-    // Both signatures still verify on a replayed policy — the version is what
-    // distinguishes "apply this change" from "roll authority backwards".
-    const doc = await update({}, { policy_version: 2, current_policy_version: 5 });
-    await denies('ERR_POLICY_VERSION', () => run(doc));
-  });
-
-  it('accepts a version that supersedes the stored one', async () => {
-    const doc = await update({ version: 6 }, { current_policy_version: 5 });
-    expect((await run(doc)).applicable).toBe(true);
-  });
-
-  it('refuses a non-positive or non-integer version', async () => {
-    // Asserted directly against assertPolicyIntegrity rather than through a full
-    // run, because a full run can no longer REACH this check with a bad version:
-    // §9.4 step 5 verifies signatures first, and under -02 the version is inside
-    // the signed preimage, so any tampered version fails as a signature error
-    // before the format rule is consulted.
-    //
-    // That ordering is the security property working, so the test follows the
-    // rule to where it still applies instead of asserting the old sequence.
-    for (const v of [0, -1, 1.5, '2', null, [], undefined]) {
-      await expect(assertPolicyIntegrity({ ...VALID_POLICY_DOC, version: v }))
-        .rejects.toMatchObject({ code: 'ERR_POLICY_VERSION' });
+describe('§8.3 — dynamic policy is bounded by the static template, after the signatures', () => {
+  it('permits narrowing, exactly the ceiling, and an empty grant', async () => {
+    for (const scopes of [['read:events'], [], ]) {
+      const d = clone(); d.policy.body.scopes = scopes; await resignPolicy(d);
+      expect((await run(d)).applicable).toBe(true);
     }
   });
+  it('REFUSES a grant beyond AllowedScopes, despite two valid signatures and a matching hash', async () => {
+    const d = clone(); d.policy.body.scopes = ['read:events', 'admin:all']; await resignPolicy(d);
+    await refuses('ERR_POLICY_EXCEEDS_TEMPLATE', run(d));
+  });
+  it('refuses spawn targets beyond CanSpawn', async () => {
+    const d = clone(); d.policy.body.spawn_targets = ['019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d']; await resignPolicy(d);
+    await refuses('ERR_SPAWN_EXCEEDS_TEMPLATE', run(d));
+  });
+  it('checks the ceiling AFTER the signatures: a widened AND badly signed policy reports the signature', async () => {
+    const d = clone(); d.policy.body.scopes = ['admin:all']; d.policy.content_hash = await contentHash(d.policy.body);
+    await refuses('ERR_OWNER_SIG_INVALID', run(d));
+  });
+  it('the ceiling is read from the certificate, not from anything in the document', async () => {
+    const d = clone();
+    expect(templateOf(childOf(d)).allowed_scopes).toEqual(['read:events']);
+    expect(childOf(d).metadata.allowed_scopes).toBeUndefined();
+  });
+});
 
-  it('refuses a version that does not supersede the stored one', async () => {
-    for (const [version, current] of [[1, 1], [1, 5], [5, 5]]) {
-      await expect(assertPolicyIntegrity(
-        { ...VALID_POLICY_DOC, version }, { currentVersion: current },
-      )).rejects.toMatchObject({ code: 'ERR_POLICY_VERSION' });
+// ── The stage functions on their own — shapes the seed document cannot take ──
+describe('the stage functions refuse malformed input on their own', () => {
+  const sync = (code, fn) => refuses(code, Promise.resolve().then(fn));
+  it('stage 5 — the field guard refuses a body that is not an object', async () => {
+    for (const bad of [null, [], 'policy', 7]) {
+      const e = await sync('ERR_SCHEMA_VIOLATION', () => assertFieldGuard(bad));
+      expect(e.detail).toMatch(/must be an object/);
     }
-    await expect(assertPolicyIntegrity(
-      { ...VALID_POLICY_DOC, version: 6 }, { currentVersion: 5 },
-    )).resolves.toBeUndefined();
   });
-
-  it('a non-integer version cannot be signed in the first place', async () => {
-    const { CanonicalError } = await import('../src/canonical.js');
-    await expect(update({ version: 1.5 })).rejects.toThrow(CanonicalError);
+  it('stage 6 — spawn_targets must be an array; version a positive integer', async () => {
+    const body = clone().policy.body;
+    const e = await sync('ERR_SCHEMA_VIOLATION', () => assertRequiredFields({ ...body, spawn_targets: 'all' }));
+    expect(e.detail).toMatch(/spawn_targets/);
+    for (const v of ['2', 0, -1, 1.5, null]) {
+      await sync('ERR_POLICY_VERSION', () => assertRequiredFields({ ...body, version: v }));
+    }
   });
-
-  it('version lives INSIDE policy_doc, and is therefore signed (§9.6)', async () => {
-    // The inverse of what this test asserted under -01, and the change is the
-    // whole security fix. -01's field guard refused `version` inside the policy
-    // document, which put it on the envelope, outside the signed preimage —
-    // where an attacker holding no key could rewrite it.
-    const doc = await update({ version: 4 }, { current_policy_version: 3 });
-    expect(doc.policy_doc.version).toBe(4);
-    expect(doc.policy_version).toBeUndefined();
-    expect((await run(doc)).applicable).toBe(true);
+  it('stage 4 — the integrity check refuses a non-positive-integer version on its own', async () => {
+    const body = clone().policy.body;
+    const c = parseCertificate(childOf(base).cert_pem);
+    for (const v of [0, '1', 2.5]) {
+      await refuses('ERR_POLICY_VERSION', assertPolicyIntegrity({ ...body, version: v }, { certNotAfter: c.notAfter.value, now }));
+    }
   });
-
-  it('rewriting the version breaks the signature (§9.6)', async () => {
-    // The replay, demonstrated at the unit level. The attacker holds no key.
-    const doc = await update({ version: 2 }, { current_policy_version: 5 });
-    await denies('ERR_POLICY_VERSION', () => run(doc));   // stale, refused
-    doc.policy_doc.version = 6;                            // one integer, no key
-    await denies('ERR_PA_SIG_INVALID', () => run(doc));    // -01: this PASSED
+  it('§8.3 — a dynamic policy cannot be bounded without a template', async () => {
+    const e = await sync('ERR_POLICY_EXCEEDS_TEMPLATE', () => assertWithinTemplateBounds(clone().policy.body, null));
+    expect(e.detail).toMatch(/template certificate is required/);
   });
-
-  it('the content hash is still refused inside its own preimage', async () => {
-    await denies('ERR_UNKNOWN_POLICY_FIELD', async () => run(await update({ content_hash: 'x' })));
-  });
-
-  it('the content hash is SHA-256 over the canonical POLICY fields (TV-23/24)', async () => {
-    const doc = { subject: AGENT_B, org_id: 'tonyai-org', scopes: ['read:events'],
-      version: 2, owner: 'o@example.com', issued_at: '2026-06-06T20:00:00Z' };
-    expect(await policyContentHash(doc)).toMatch(/^[0-9a-f]{64}$/);
-    // Deterministic, and a changed policy changes the hash.
-    expect(await policyContentHash(doc)).toBe(await policyContentHash({ ...doc }));
-    expect(await policyContentHash(doc))
-      .not.toBe(await policyContentHash({ ...doc, scopes: ['write:events'] }));
+  it('§11.2 / §11.4 — the policy must name the agent whose template bounds it', async () => {
+    const d = clone();
+    const t = templateOf(childOf(d));
+    const other = parentOf(d).metadata.agent_id;
+    expect(other).not.toBe(t.subject);
+    const e = await sync('ERR_SUBJECT_UNKNOWN', () =>
+      assertOwnership({ ...d.policy.body, subject: other, owner: t.owner, org_id: t.org_id }, t));
+    expect(e.detail).toMatch(/subject/);
   });
 });

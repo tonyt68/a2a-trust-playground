@@ -1,268 +1,107 @@
 /**
- * Revocation and authorization bounds — stages 3, 7 and 8.
- *
- * Ported from ietf-a2a-trust-poc:
- *   services/mcp_server/cert_manager.py            check_crl()            -> stage 3
- *   services/mcp_server/policy_authority_chain.py  chain of custody       -> stage 3
- *   services/mcp_server/cert_validator.py          parse_auth_bounds()    -> stage 7
- *                                                  validate_spawn_check1()
- *                                                  validate_max_children()
- *                                                  validate_scope_subset() -> stage 8
+ * Revocation (§14), the two-check spawn rule (§10.1), the MaxChildren
+ * consistency check (§10.2), scope containment (§10.3) and cross-organizational
+ * grants (§13) — stages 3, 7 and 8.
  *
  * ── Where authorisation actually lives ─────────────────────────────────────
  *
- * Not in the certificate. The certificate says *who* (§6); this document says
- * *may they* (§7). Three fields carry it, and they are not interchangeable:
+ * In the certificate, since -03. §8.2 carries the template's static fields in
+ * the Agent Template extension, signed by the CA; §10.5 carries the parent link
+ * in the Agent Spawn extension, likewise. So every bound consulted here was
+ * read out of a certificate that has already verified to the anchor, never out
+ * of a document the agent assembled. The chain document restates identifiers
+ * and carries the request; it asserts no authority.
  *
- *   allowed_scopes   what this agent may do            — MUTABLE via §9.3
- *   can_spawn        which children it may instantiate — IMMUTABLE, new cert
- *   max_children     how many it may have at once      — IMMUTABLE, new cert
- *
- * The two immutable ones are the structural bounds. A policy update cannot widen
- * them (stage 5 refuses), so an agent's blast radius is fixed at issuance and can
- * only grow by the CA issuing a new certificate — a decision with a different
- * signer and a different audit trail than a policy change.
+ *   allowed_scopes   what this agent may hold                — ceiling for §11
+ *   can_spawn        which children it may instantiate       — §10.1 Check 1
+ *   permitted_operations  whether it may spawn at all        — §10.1 Check 1
+ *   max_children     how many at once; the Registry enforces — §10.2, consistency here
  *
  * ── Fail-closed is a real rule here, not a slogan ──────────────────────────
  *
- * `service.py` denies when bounds are absent or unparseable rather than treating
- * a missing field as an empty permission set. Both refuse the request, so the
- * difference looks academic — until the metadata is malformed for a reason the
- * visitor should see. Reporting "bounds unparseable" rather than "scope not
- * permitted" is what makes the pipeline diagnostic instead of merely correct.
+ * An unreadable CRL is not an empty CRL. A missing grant is not permission.
+ * Refusals name what was absent so the pipeline is diagnostic, not merely
+ * correct.
  */
 
 import { DenyError } from './errors.js';
-import { validateScopeSet, validateUuid4, validateInteger, MAX_CHILDREN } from './validate-input.js';
+import {
+  validateScopeSet, validateUuid, validateText, validateInteger, validateTimestamp,
+  assertFlatObject,
+} from './validate-input.js';
+import { GRANT_FIELDS, ENVELOPE_FIELDS } from './canonical.js';
+import { publicKeyFromCertificate, verifyBody } from './crypto-sign.js';
+import { parseCertificate, subjectCN, spkiHex } from './x509.js';
+import { FRESHNESS_WINDOW_MS } from './mint.js';
 
 /**
- * Stage 3 — revocation and chain of custody (§12).
+ * Stage 3 — revocation (§14) and the Registry's DISABLED state (§12.4).
  *
- * The reference implementation keeps the CRL on disk and checks three things:
- * revoked, disabled, and TTL expiry. In-memory here, same three checks. §12.3
- * requires TTL expiry to be automatic rather than a manual revocation step, so
- * an elapsed `expires_at` is a revocation whether or not anyone listed it.
- *
- * @param {object} opts
- * @param {string} opts.agentId
- * @param {{revoked?: string[], disabled?: string[]}} opts.crl
- * @param {object} opts.metadata
- * @param {Date}   [opts.now]
+ * `crl.revoked` models the CA's revocation state. `crl.disabled` models the
+ * Registry's DISABLED list, which §12.4 says is NOT a CRL entry: it is reported
+ * by the Registry in Check 2 of §10.1. The page plays the Registry, so it
+ * consults that list here; the refusal says which of the two it was.
  */
-export function assertNotRevoked({ agentId, crl, metadata, now = new Date() }) {
-  // Fail closed: an unreadable CRL is not an empty CRL. cert_manager.check_crl
-  // returns False (deny) when the list cannot be loaded, and so does this.
+export function assertNotRevoked({ agentId, crl }) {
+  // Fail closed: an unreadable CRL is not an empty CRL.
   if (crl === null || typeof crl !== 'object' || Array.isArray(crl)) {
     throw new DenyError('ERR_AGENT_REVOKED', 'revocation list is unreadable — failing closed');
   }
-
   const revoked = crl.revoked ?? [];
   const disabled = crl.disabled ?? [];
   if (!Array.isArray(revoked) || !Array.isArray(disabled)) {
     throw new DenyError('ERR_AGENT_REVOKED', 'revocation list is malformed — failing closed');
   }
-
   if (revoked.includes(agentId)) {
-    throw new DenyError('ERR_AGENT_REVOKED', 'agent is on the revocation list');
+    throw new DenyError('ERR_AGENT_REVOKED', 'certificate is on the revocation list');
   }
   if (disabled.includes(agentId)) {
-    throw new DenyError('ERR_AGENT_REVOKED', 'agent is disabled');
-  }
-
-  const expiresAt = metadata?.expires_at;
-  if (expiresAt) {
-    const t = Date.parse(expiresAt);
-    if (Number.isNaN(t)) {
-      throw new DenyError('ERR_TTL_EXPIRED', 'expires_at is unparseable — failing closed');
-    }
-    if (now.getTime() > t) {
-      throw new DenyError('ERR_TTL_EXPIRED', `agent TTL elapsed at ${new Date(t).toISOString()}`);
-    }
+    throw new DenyError('ERR_AGENT_DISABLED',
+      'template is DISABLED at the Registry (§12.4) — not a revocation; no new spawns are accepted from it');
   }
 }
 
 /**
- * Stage 2's state check (§10.4), kept here with the other metadata-driven rules.
- * The lifecycle is ACTIVE -> DISABLED -> DELETED and only ACTIVE is authorised.
- */
-export const AGENT_STATES = Object.freeze(['ACTIVE', 'DISABLED', 'DELETED']);
-
-export function assertActive(metadata) {
-  const state = metadata?.state;
-  if (state === undefined) {
-    // The reference treats a missing state as ACTIVE. This does not: a document
-    // that omits its own lifecycle field is malformed, and defaulting it to the
-    // one permissive value is the shape of a fail-open bug.
-    throw new DenyError('ERR_AGENT_DISABLED', 'metadata does not declare a state');
-  }
-  if (!AGENT_STATES.includes(state)) {
-    throw new DenyError('ERR_AGENT_DISABLED', `unknown state — expected one of ${AGENT_STATES.join(', ')}`);
-  }
-  if (state !== 'ACTIVE') {
-    throw new DenyError('ERR_AGENT_DISABLED', `agent state is ${state}`);
-  }
-}
-
-/**
- * The §7.1 static fields, plus the operational fields setup_keys.py emits.
+ * Stage 7 — §10.1 Check 1, read from the PARENT's Agent Template extension:
+ * the parent holds `spawn`, and the child is in its CanSpawn list. Check 2 (the
+ * child is registered, CA-signed, not revoked, not DISABLED, and owned by the
+ * right organization) is stages 2 and 3 applied to the child, plus the grant
+ * check below.
  *
- * A whitelist, because DESIGN.md's input contract says unknown keys are
- * REJECTED, not ignored. Found by the red-team pass: a document carrying
- * `"admin": true` or `"rebac_override": true` in agent metadata validated
- * cleanly. Those keys are inert today — nothing reads them — which is exactly
- * why silently accepting them is the wrong behaviour: the next field added to
- * this schema would be silently ignored on a document that predates it, and a
- * reader of the JSON would reasonably assume a key that survives validation
- * means something.
+ * The sibling count is a CONSISTENCY check on the document (§10.2). The
+ * Registry holds the count MaxChildren is compared against and enforces it
+ * atomically at spawn time; a stateless page cannot, and the draft forbids
+ * presenting a document-local count as enforcement.
  */
-export const KNOWN_METADATA_FIELDS = new Set([
-  // §7.1 static fields, all REQUIRED
-  'subject', 'agent_id', 'agent_uuid', 'issuer', 'owner', 'org_id', 'permitted_operations',
-  'allowed_scopes', 'can_spawn', 'max_children', 'policy_ref',
-  'ttl_seconds',
-  // operational
-  'template_version', 'state', 'created_at', 'expires_at', 'cert_path', 'key_path',
-  'parent_agent_id', 'authorization_bounds', 'updated_at', 'description', 'tags',
-  // cert-derived identity fields the reference implementation recognises
-  'cert_serial', 'cert_issuer', 'cert_subject', 'cert_public_key',
-  'cert_not_before', 'cert_not_after', 'cert_fingerprint', 'cert_chain',
-]);
-
-export function assertKnownMetadataFields(metadata) {
-  const unknown = Object.keys(metadata)
-    .filter((k) => !KNOWN_METADATA_FIELDS.has(k)).sort();
-  if (unknown.length) {
-    throw new DenyError('ERR_SCHEMA_VIOLATION',
-      `metadata contains unknown field(s): ${unknown.join(', ')}`);
+export function assertSpawnPermitted({ parentTemplate, childId, siblings = 0 }) {
+  validateUuid(childId, 'child agent_id');
+  if (!parentTemplate.permitted_operations.includes('spawn')) {
+    throw new DenyError('ERR_SPAWN_NOT_PERMITTED',
+      `parent PermittedOperations is [${parentTemplate.permitted_operations.join(', ')}] — spawn is not among them`);
   }
-}
-
-/**
- * `cert_path` and `key_path` name files, and this document is meant to be
- * RECONSTITUTED — the round-trip harness writes a directory from it, and so
- * would any other consumer.
- *
- * In the browser they are inert strings. That is exactly the trap: nothing here
- * dereferences them, so nothing here noticed that
- * `cert_path: "../../../../etc/passwd"` validated cleanly and was then handed on
- * in the export as though it had been checked. A field that survives validation
- * reads as validated to whoever consumes it next.
- *
- * So they are pinned to the shape setup_keys.py emits — `certs/{uuid4}.crt` —
- * and nothing else. No traversal, no absolute paths, no alternate directory.
- */
-const CERT_PATH = /^certs\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.crt$/;
-const KEY_PATH = /^certs\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.key$/;
-
-export function assertSafePaths(metadata) {
-  for (const [field, pattern] of [['cert_path', CERT_PATH], ['key_path', KEY_PATH]]) {
-    const value = metadata[field];
-    if (value === undefined) continue;
-    if (typeof value !== 'string' || !pattern.test(value)) {
-      throw new DenyError('ERR_SCHEMA_VIOLATION',
-        `${field} must be exactly certs/{agent-uuid}.${field === 'cert_path' ? 'crt' : 'key'}`);
-    }
-    // Belt and braces: the anchored regex cannot match these, but a future edit
-    // to it might, and this is the check whose absence caused the finding.
-    if (value.includes('..') || value.includes('//') || value.startsWith('/')) {
-      throw new DenyError('ERR_SCHEMA_VIOLATION', `${field} contains a path traversal sequence`);
-    }
-  }
-}
-
-/**
- * Stage 7 — parse and validate the authorization bounds (§7).
- *
- * `authorization_bounds` is a deliberate duplicate of three top-level fields;
- * `service.py` reads the nested copy and `setup_keys.py` emits both. Where they
- * disagree this refuses rather than picking a winner — a document whose two
- * copies of `max_children` differ has no single answer to "how many children",
- * and silently preferring one is how a bound gets bypassed.
- */
-export function parseAuthorizationBounds(metadata) {
-  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
-    throw new DenyError('ERR_BOUNDS_UNPARSEABLE', 'metadata is not an object');
-  }
-
-  const nested = metadata.authorization_bounds;
-  if (nested !== undefined && (nested === null || typeof nested !== 'object' || Array.isArray(nested))) {
-    throw new DenyError('ERR_BOUNDS_UNPARSEABLE', 'authorization_bounds is not an object');
-  }
-
-  const bounds = {};
-  for (const field of ['allowed_scopes', 'can_spawn', 'max_children']) {
-    const top = metadata[field];
-    const dup = nested?.[field];
-    if (top === undefined && dup === undefined) {
-      throw new DenyError('ERR_BOUNDS_UNPARSEABLE', `${field} is absent`);
-    }
-    if (top !== undefined && dup !== undefined
-        && JSON.stringify(top) !== JSON.stringify(dup)) {
-      throw new DenyError('ERR_BOUNDS_UNPARSEABLE',
-        `${field} disagrees between the top level and authorization_bounds`);
-    }
-    bounds[field] = top !== undefined ? top : dup;
-  }
-
-  validateScopeSet(bounds.allowed_scopes, 'allowed_scopes');
-  if (!Array.isArray(bounds.can_spawn)) {
-    throw new DenyError('ERR_BOUNDS_UNPARSEABLE', 'can_spawn must be an array');
-  }
-  bounds.can_spawn.forEach((id) => validateUuid4(id, 'can_spawn entry'));
-  if (new Set(bounds.can_spawn).size !== bounds.can_spawn.length) {
-    throw new DenyError('ERR_BOUNDS_UNPARSEABLE', 'can_spawn contains duplicates');
-  }
-  validateInteger(bounds.max_children, 'max_children', 0, MAX_CHILDREN);
-
-  // ttl_seconds is a §7.1 REQUIRED field and was going unvalidated: a document
-  // carrying `1e999` serialises to `null` and sailed through. A required field
-  // that nothing checks is a required field in name only.
-  validateInteger(metadata.ttl_seconds, 'ttl_seconds', 1, 60 * 60 * 24 * 365);
-
-  assertKnownMetadataFields(metadata);
-  assertSafePaths(metadata);
-
-  return bounds;
-}
-
-/**
- * Stage 7 — the two-check spawn rule (§8.1).
- *
- * The draft is explicit that CanSpawn alone is insufficient but MUST pass first,
- * and that a registry lookup alone is also insufficient. Check 1 is static and
- * lives here; check 2 (the child is registered, CA-signed, ACTIVE) is stage 2
- * applied to the child, which the pipeline runs for every node in the chain.
- */
-export function assertMaySpawn({ parentBounds, childId, currentChildren = 0 }) {
-  validateUuid4(childId, 'child agent_id');
-
-  if (!parentBounds.can_spawn.includes(childId)) {
+  if (!parentTemplate.can_spawn.includes(childId)) {
     throw new DenyError('ERR_CHILD_NOT_WHITELISTED',
-      'child is not in the parent can_spawn whitelist — a new certificate is required to add it');
+      'child is not in the parent CanSpawn list — a new certificate is required to add it');
   }
-
-  // cert_validator.validate_max_children only enforces when max_children > 0,
-  // which reads a zero cap as "unlimited". That is backwards for a structural
-  // bound: 0 means no children, and this refuses accordingly.
-  if (currentChildren >= parentBounds.max_children) {
+  // A zero cap means no children, not unlimited.
+  if (siblings + 1 > parentTemplate.max_children) {
     throw new DenyError('ERR_MAX_CHILDREN',
-      `max_children is ${parentBounds.max_children} and the parent already has ${currentChildren}`);
+      `the document names ${siblings + 1} child(ren) of a parent whose MaxChildren is ${parentTemplate.max_children}`);
   }
 }
 
 /**
- * Stage 8 — scope containment (§8.3), fail-closed.
+ * Stage 8 — scope containment (§10.3), fail-closed.
  *
- * Plain subset over sets of strings: `requested ⊆ allowed`. No wildcards, no
- * prefix matching, no hierarchy. `write:events` does not imply `read:events`
- * and `admin:*` means nothing — a scope is an opaque token, and any cleverness
- * here becomes an escalation path.
+ * Set containment over opaque tokens: `requested ⊆ allowed`. No wildcards, no
+ * prefix matching, no hierarchy, no case folding — §10.3 forbids all four.
+ * Comparison is on the parsed set; the order on the wire is left alone.
  *
- * Empty requested scopes are refused (§16.1): an agent must declare intent, and
- * an empty set would otherwise vacuously satisfy the subset test.
+ * A request for no scopes is refused: the empty set is a subset of every set,
+ * so it satisfies the test vacuously while declaring no intent for it to bound.
  */
-export function assertScopeSubset(requested, allowed) {
-  validateScopeSet(requested, 'requested_scopes');
+export function assertScopeSubset(requested, allowed, { label = 'requested' } = {}) {
+  validateScopeSet(requested, `${label} scopes`);
   validateScopeSet(allowed, 'allowed_scopes');
 
   if (requested.length === 0) {
@@ -273,17 +112,127 @@ export function assertScopeSubset(requested, allowed) {
   const excess = requested.filter((s) => !permitted.has(s));
   if (excess.length > 0) {
     throw new DenyError('ERR_SCOPE_ESCALATION',
-      `requested [${excess.join(', ')}] not subset of [${allowed.join(', ')}]`);
+      `${label} [${excess.join(', ')}] not subset of [${allowed.join(', ')}]`);
   }
   return true;
 }
 
 /**
- * §8.3 delegation: a child's scopes must be a subset of the parent's. Refusal
- * happens HERE, at issuance, rather than at verification — the escalation is
- * prevented before a certificate exists, which is the act the playground leads
- * with because it is the part most people have never seen.
+ * Cross-organizational grant (§13.2), as a §3.1 envelope. Evaluated when a
+ * child's template is owned by an organization other than its parent's.
+ *
+ * Everything below is a MUST of §13.1-§13.3 except the last, which is the
+ * same document-consistency reading of MaxSpawns that §10.2 gives MaxChildren:
+ * the Grantor's Registry enforces the cap; the document is checked for
+ * coherence with it.
+ *
+ * @param {object} opts
+ * @param {object} opts.grant           the envelope from the document
+ * @param {object} opts.childTemplate   the template being granted (from the child's certificate)
+ * @param {object} opts.parentTemplate  the spawning agent's template (from its certificate)
+ * @param {string} opts.ownerCertPem    the grantor's Owner certificate, already validated to the anchor
+ * @param {string} opts.paCertPem       the grantor's Policy Authority certificate, likewise
+ * @param {Date}   opts.now
+ * @param {number} [opts.spawnsUnderGrant]  children this document names under the grant
  */
-export function assertDelegationPermitted({ parentScopes, childScopes }) {
-  return assertScopeSubset(childScopes, parentScopes);
+export async function validateGrant({
+  grant, childTemplate, parentTemplate, ownerCertPem, paCertPem, now, spawnsUnderGrant = 1,
+}) {
+  if (grant === null || typeof grant !== 'object' || Array.isArray(grant)) {
+    throw new DenyError('ERR_GRANT_INVALID', 'grant is not an envelope');
+  }
+  const stray = Object.keys(grant).filter((k) => !ENVELOPE_FIELDS.includes(k)).sort();
+  if (stray.length) {
+    throw new DenyError('ERR_ENVELOPE_MEMBER', `grant envelope carries ${stray.join(', ')}`);
+  }
+  if ('content_hash' in grant) {
+    throw new DenyError('ERR_ENVELOPE_MEMBER',
+      'grant envelope carries content_hash, which §11.6 requires of a policy and not of a grant');
+  }
+  const body = grant.body;
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new DenyError('ERR_GRANT_INVALID', 'grant body is missing');
+  }
+  assertFlatObject(body, 'grant');
+  const keys = Object.keys(body);
+  const missing = GRANT_FIELDS.filter((f) => !keys.includes(f));
+  if (missing.length) throw new DenyError('ERR_GRANT_INVALID', `grant omits ${missing.join(', ')}`);
+  const extra = keys.filter((k) => !GRANT_FIELDS.includes(k)).sort();
+  if (extra.length) throw new DenyError('ERR_GRANT_INVALID', `grant carries ${extra.join(', ')}, which Table 10 does not define`);
+
+  try {
+    validateText(body.grantor, 'grantor');
+    validateText(body.grantee, 'grantee');
+    validateUuid(body.template, 'template');
+    validateScopeSet(body.allowed_scopes, 'allowed_scopes');
+    validateTimestamp(body.issued_at, 'issued_at');
+    validateInteger(body.ttl_seconds, 'ttl_seconds', 1, 10 * 365 * 86400);
+    validateInteger(body.max_spawns, 'max_spawns', 0, 1_000_000);
+  } catch (e) {
+    if (e instanceof DenyError && e.code !== 'ERR_FIELD_CHARSET' && e.code !== 'ERR_FIELD_RANGE'
+        && e.code !== 'ERR_SCHEMA_VIOLATION') throw e;
+    throw new DenyError('ERR_GRANT_INVALID', e.detail || e.message);
+  }
+
+  // Addressed to the right parties: the grantor owns the template, the grantee
+  // is the spawning agent's organization, and the template is the one spawned.
+  if (body.template !== childTemplate.subject) {
+    throw new DenyError('ERR_GRANT_INVALID', 'grant names a template other than the one being spawned');
+  }
+  if (body.grantor !== childTemplate.org_id) {
+    throw new DenyError('ERR_GRANT_INVALID',
+      `grantor "${body.grantor}" is not the organization that owns the template ("${childTemplate.org_id}")`);
+  }
+  if (body.grantee !== parentTemplate.org_id) {
+    throw new DenyError('ERR_GRANT_INVALID',
+      `grantee "${body.grantee}" is not the spawning agent's organization ("${parentTemplate.org_id}")`);
+  }
+
+  // Time: expired at IssuedAt + TTL; dated in the future by more than the window.
+  const issued = new Date(body.issued_at).getTime();
+  if (issued > now.getTime() + FRESHNESS_WINDOW_MS) {
+    throw new DenyError('ERR_GRANT_EXPIRED', 'grant is dated later than this clock by more than the freshness window');
+  }
+  const expiry = issued + body.ttl_seconds * 1000;
+  if (now.getTime() > expiry) {
+    throw new DenyError('ERR_GRANT_EXPIRED', `grant expired at ${new Date(expiry).toISOString()}`);
+  }
+
+  // Bounded by the template it grants.
+  const ceiling = new Set(childTemplate.allowed_scopes);
+  const excess = body.allowed_scopes.filter((s) => !ceiling.has(s));
+  if (excess.length) {
+    throw new DenyError('ERR_GRANT_EXCEEDS_TEMPLATE',
+      `grant allows [${excess.join(', ')}] beyond the template's AllowedScopes`);
+  }
+
+  // Signed by the grantor's Owner and Policy Authority (§13.2), whose
+  // certificates the relying party has validated to its anchor (§13.3), over
+  // the JCS form of the body (§3.1), by two distinct keys.
+  if (!grant.owner_sig || !grant.pa_sig) {
+    throw new DenyError('ERR_GRANT_INVALID',
+      `grant carries ${grant.owner_sig ? 'no Policy Authority' : 'no Owner'} signature`);
+  }
+  const ownerCert = parseCertificate(ownerCertPem);
+  if (subjectCN(ownerCert) !== childTemplate.owner) {
+    throw new DenyError('ERR_OWNER_CERT_MISMATCH',
+      'the Owner certificate does not name the owner of the granted template');
+  }
+  if (spkiHex(ownerCert) === spkiHex(parseCertificate(paCertPem))) {
+    throw new DenyError('ERR_SINGLE_SIGNATURE', 'Owner and Policy Authority present the same public key');
+  }
+  const ownerKey = await publicKeyFromCertificate(ownerCertPem);
+  const paKey = await publicKeyFromCertificate(paCertPem);
+  if (!(await verifyBody(body, grant.owner_sig, ownerKey))) {
+    throw new DenyError('ERR_GRANT_INVALID', 'Owner signature does not verify over the grant');
+  }
+  if (!(await verifyBody(body, grant.pa_sig, paKey))) {
+    throw new DenyError('ERR_GRANT_INVALID', 'Policy Authority signature does not verify over the grant');
+  }
+
+  if (spawnsUnderGrant > body.max_spawns) {
+    throw new DenyError('ERR_MAX_SPAWNS',
+      `the document names ${spawnsUnderGrant} agent(s) under a grant whose MaxSpawns is ${body.max_spawns}`);
+  }
+  return body;
 }

@@ -18,22 +18,29 @@
  *
  * The single most misread detail: **the signature covers the tbsCertificate
  * bytes only** — not the whole certificate, and not a re-serialisation of the
- * parsed fields. Verifying means re-hashing the exact tbsCertificate DER as it
- * appeared on the wire and checking that hash against the signature using the
- * ISSUER's public key. This is why re-encoding a certificate can break its
- * signature even when every field is unchanged, and why `describeCertificate`
- * below reports the tbsCertificate length and digest explicitly.
+ * parsed fields. This is why re-encoding a certificate can break its signature
+ * even when every field is unchanged.
  *
- * A certificate therefore proves exactly one thing: *the holder of the issuer's
- * private key asserted this binding of a public key to a name, during this
- * window.* It carries no authorisation. That is why this draft keeps
- * authorisation in a separate signed metadata document (§7) — the certificate
- * answers "who", the metadata answers "may they".
+ * ── Two views of the same extension ─────────────────────────────────────────
+ *
+ * The Agent Template extension (§8.2) and the Agent Spawn extension (§10.5)
+ * are critical OCTET STRINGs holding JCS. A stack that does not implement the
+ * draft sees an unrecognised critical OID and a blob, and must refuse the
+ * certificate (RFC 5280 §4.2). A conformant validator sees the members. Both
+ * views are produced here, side by side, because the difference IS the design:
+ * the certificate is unusable except by a party that understands what it says.
  */
 
 import * as asn1js from 'asn1js';
-import { parseCertificate, subjectCN, issuerCN, rsaKeyBits, isSelfSigned, validityWindow } from './x509.js';
-import { validatePem } from './validate-input.js';
+import {
+  parseCertificate, subjectCN, issuerCN, publicKeyInfo, isSelfSigned, validityWindow,
+  normalizeOid, TEMPLATE_EXT_OID, SPAWN_EXT_OID, MIN_SECURITY_BITS, KEY_USAGE_NAMES, keyUsageBits,
+} from './x509.js';
+import { bytesToHex } from './encoding.js';
+import { validatePem, parseJsonStrict } from './validate-input.js';
+import { canonicalize } from './canonical.js';
+
+export { normalizeOid };
 
 /** Attribute types that appear in the DNs this profile issues. */
 const DN_NAMES = {
@@ -51,20 +58,24 @@ const EXT_NAMES = {
   '2.5.29.32': 'certificatePolicies',
   '2.5.29.35': 'authorityKeyIdentifier',
   '2.5.29.37': 'extendedKeyUsage',
+  '1.3.6.1.5.5.7.1.1': 'authorityInfoAccess',
+  [TEMPLATE_EXT_OID]: 'agentTemplate (draft-tonyai-a2a-trust §8.2)',
+  [SPAWN_EXT_OID]: 'agentSpawn (draft-tonyai-a2a-trust §10.5)',
 };
 
 const SIG_ALGS = {
   '1.2.840.113549.1.1.11': 'sha256WithRSAEncryption',
   '1.2.840.113549.1.1.12': 'sha384WithRSAEncryption',
   '1.2.840.113549.1.1.13': 'sha512WithRSAEncryption',
+  '1.2.840.113549.1.1.10': 'RSASSA-PSS',
   '1.2.840.113549.1.1.1': 'rsaEncryption',
+  '1.2.840.10045.4.1': 'ecdsa-with-SHA1',
+  '1.2.840.10045.4.3.2': 'ecdsa-with-SHA256',
+  '1.2.840.10045.4.3.3': 'ecdsa-with-SHA384',
+  '1.2.840.10045.4.3.4': 'ecdsa-with-SHA512',
+  '1.2.840.10045.2.1': 'id-ecPublicKey',
+  '1.3.101.112': 'Ed25519',
 };
-
-/** RFC 5280 §4.2.1.3 — keyUsage bits, in their defined order. */
-const KEY_USAGE_BITS = [
-  'digitalSignature', 'nonRepudiation', 'keyEncipherment', 'dataEncipherment',
-  'keyAgreement', 'keyCertSign', 'cRLSign', 'encipherOnly', 'decipherOnly',
-];
 
 const EKU_NAMES = {
   '1.3.6.1.5.5.7.3.1': 'serverAuth',
@@ -73,29 +84,8 @@ const EKU_NAMES = {
   '1.3.6.1.5.5.7.3.4': 'emailProtection',
 };
 
-/**
- * PKI.js renders an OID arc it cannot hold in a JS number as `2.25.{hex…}`.
- * The 2.25 (UUID) arc is always 128 bits, so every OID under it hits this. The
- * value is correct on the wire — OpenSSL reads it back fine — but showing
- * `2.25.{03701d27…}` on a page about certificate internals would be displaying
- * a decoding artefact as if it were the certificate's content.
- */
-export function normalizeOid(oid) {
-  return String(oid).replace(/\{([0-9a-fA-F]+)\}/g, (_, h) => {
-    // The hex is the arc's raw BER bytes, base-128 with a continuation bit in
-    // the top position of every byte but the last — not a plain big-endian
-    // integer. Reading it as one gives a different, wrong number that still
-    // looks like a plausible OID, which is the worst kind of wrong.
-    let value = 0n;
-    for (let i = 0; i < h.length; i += 2) {
-      value = (value << 7n) | (BigInt(parseInt(h.slice(i, i + 2), 16)) & 0x7fn);
-    }
-    return value.toString();
-  });
-}
-
-const hex = (bytes) => Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
-const hexColons = (bytes) => Array.from(bytes).map((b) => b.toString(16).padStart(2, '0').toUpperCase()).join(':');
+const hex = bytesToHex;
+const hexColons = (bytes) => bytesToHex(bytes).toUpperCase().match(/../g).join(':');
 
 /** Structured DN: ordered attributes, because RDN ORDER IS SIGNIFICANT (§4.2.1.10). */
 export function describeName(name) {
@@ -107,15 +97,50 @@ export function describeName(name) {
   return { attributes, rfc4514: attributes.map((a) => `${a.name}=${a.value}`).join(', ') };
 }
 
+/** The same decoder the validator uses, so the view and the verdict cannot disagree about what a certificate asserts. */
 function describeKeyUsage(ext) {
-  const view = new Uint8Array(ext.parsedValue.valueBlock.valueHexView);
-  const unused = ext.parsedValue.valueBlock.unusedBits ?? 0;
-  const total = view.length * 8 - unused;
-  const set = [];
-  for (let i = 0; i < Math.min(total, KEY_USAGE_BITS.length); i++) {
-    if (view[Math.floor(i / 8)] & (0x80 >> (i % 8))) set.push(KEY_USAGE_BITS[i]);
+  const bits = keyUsageBits(ext);
+  return KEY_USAGE_NAMES.filter((_, i) => bits.has(i));
+}
+
+/**
+ * The two views of a profile extension. `raw` is what any X.509 stack sees;
+ * `decoded` is what a conformant validator sees. Decoding here is descriptive
+ * and lenient — it shows what is there even when `x509.js` would refuse it,
+ * and says so.
+ */
+function describeJcsExtension(ext, base, label) {
+  const raw = new Uint8Array(ext.extnValue.valueBlock.valueHexView);
+  const generic = {
+    ...base,
+    value: hex(raw).slice(0, 64),
+    summary: `${raw.length} bytes — an OCTET STRING under an OID this stack does not know; ` +
+      (ext.critical ? 'critical, so RFC 5280 §4.2 requires refusing the certificate' : 'NOT critical, so it would be silently ignored'),
+  };
+  let text = null;
+  let members = null;
+  let problem = null;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(raw);
+    const obj = parseJsonStrict(text);
+    if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) problem = 'not a JSON object';
+    else if (canonicalize(obj) !== text) problem = 'valid JSON but not its own canonical form (not JCS)';
+    else members = Object.entries(obj).map(([k, v]) => ({ member: k, value: v }));
+  } catch (e) {
+    problem = e?.code === 'ERR_DUPLICATE_MEMBER' ? 'duplicate member name' : 'not valid UTF-8 JSON';
   }
-  return set;
+  return {
+    ...generic,
+    label,
+    critical: Boolean(ext.critical),
+    views: {
+      any_x509_stack: generic.summary,
+      conformant_validator: problem
+        ? `refused — ${problem}`
+        : `${members.length} members, JCS, ${raw.length} bytes`,
+    },
+    decoded: { members, problem, jcs: text },
+  };
 }
 
 function describeExtension(ext) {
@@ -123,6 +148,10 @@ function describeExtension(ext) {
   const base = { oid, name: EXT_NAMES[oid] ?? null, critical: Boolean(ext.critical) };
   try {
     switch (oid) {
+      case TEMPLATE_EXT_OID:
+        return describeJcsExtension(ext, base, 'Agent Template');
+      case SPAWN_EXT_OID:
+        return describeJcsExtension(ext, base, 'Agent Spawn');
       case '2.5.29.19': {
         const v = ext.parsedValue;
         return { ...base, value: { cA: Boolean(v.cA), pathLenConstraint: v.pathLenConstraint ?? null },
@@ -147,6 +176,12 @@ function describeExtension(ext) {
           summary: `permitted: ${permitted.map((p) => `${p.kind}:${p.value}`).join(' | ') || 'none'}`
                  + (excluded.length ? `; excluded: ${excluded.map((e) => `${e.kind}:${e.value}`).join(' | ')}` : '') };
       }
+      case '2.5.29.31': {
+        const uris = (ext.parsedValue?.distributionPoints ?? [])
+          .flatMap((dp) => (Array.isArray(dp.distributionPoint) ? dp.distributionPoint : []))
+          .filter((gn) => gn.type === 6).map((gn) => String(gn.value));
+        return { ...base, value: uris, summary: uris.length ? `URI:${uris.join(', ')}` : 'present' };
+      }
       case '2.5.29.14':
         return { ...base, value: hex(new Uint8Array(ext.parsedValue.valueBlock.valueHexView)),
           summary: 'key identifier (SHA-1 of the public key)' };
@@ -167,7 +202,6 @@ function describeExtension(ext) {
             text = inner.result.valueBlock.value;
           }
         } catch { /* not a printable inner value; fall through to hex */ }
-        // A named-but-undecoded extension is not the same as an unknown one.
         const known = EXT_NAMES[oid] ? 'not decoded by this validator' : 'unrecognised OID';
         return { ...base, value: text ?? hex(raw).slice(0, 64),
           summary: text ?? `${raw.length} bytes, ${known}` };
@@ -190,25 +224,18 @@ export async function describeCertificate(pem) {
   const { notBefore, notAfter } = validityWindow(cert);
 
   // Both digests are taken over the ORIGINAL DER as it arrived, never over a
-  // re-serialisation of the parsed structure.
-  //
-  // This is not a stylistic preference. `cert.toSchema().toBER()` re-encodes,
-  // and for this very certificate that produced 1128 bytes where the original
-  // was 1147 — a fingerprint that disagreed with `openssl x509 -fingerprint`
-  // and would have been wrong everywhere it was shown. A certificate is the
-  // bytes it was issued as; any field-level round trip is a different document.
+  // re-serialisation of the parsed structure: `cert.toSchema().toBER()`
+  // re-encodes, and a fingerprint over that disagrees with OpenSSL's.
   const { der } = validatePem(pem, 'CERTIFICATE');
   const whole = der;
   const fingerprint = new Uint8Array(await crypto.subtle.digest('SHA-256', whole));
 
-  // The bytes the signature actually covers: the tbsCertificate, which is the
-  // first element inside the outer SEQUENCE. Taken from the parsed view, which
-  // preserves the original encoding rather than rebuilding it.
   const tbsRaw = new Uint8Array(cert.tbsView ?? cert.tbs);
   const tbsDigest = new Uint8Array(await crypto.subtle.digest('SHA-256', tbsRaw));
 
   const sigBytes = new Uint8Array(cert.signatureValue.valueBlock.valueHexView);
-  const keyBits = rsaKeyBits(cert);
+  const key = publicKeyInfo(cert);
+  const extensions = (cert.extensions ?? []).map(describeExtension);
 
   return {
     subject: describeName(cert.subject),
@@ -223,14 +250,17 @@ export async function describeCertificate(pem) {
     validity: {
       not_before: notBefore.toISOString(),
       not_after: notAfter.toISOString(),
+      duration_seconds: Math.round((notAfter - notBefore) / 1000),
       duration_hours: Math.round((notAfter - notBefore) / 36e5),
     },
 
     public_key: {
       algorithm: SIG_ALGS[cert.subjectPublicKeyInfo.algorithm.algorithmId]
                  ?? cert.subjectPublicKeyInfo.algorithm.algorithmId,
-      bits: keyBits,
-      meets_minimum: keyBits !== null && keyBits >= 2048,
+      type: key.type === 'EC' ? key.curve : key.type,
+      bits: key.bits,
+      security_bits: key.security,
+      meets_minimum: key.security !== null && key.security >= MIN_SECURITY_BITS,
     },
 
     signature: {
@@ -239,8 +269,6 @@ export async function describeCertificate(pem) {
       value_prefix: `${hex(sigBytes.slice(0, 16))}…`,
     },
 
-    // The part people get wrong. Stated explicitly so a reader can see that
-    // verification is a hash over these bytes, not over the file.
     signed_bytes: {
       what: 'tbsCertificate — the certificate body, excluding signatureAlgorithm and signatureValue',
       length: tbsRaw.length,
@@ -250,56 +278,74 @@ export async function describeCertificate(pem) {
     },
 
     fingerprint_sha256: hex(fingerprint),
-    extensions: (cert.extensions ?? []).map(describeExtension),
+    extensions,
+    agent_template: extensions.find((e) => e.oid === TEMPLATE_EXT_OID)?.decoded ?? null,
+    agent_spawn: extensions.find((e) => e.oid === SPAWN_EXT_OID)?.decoded ?? null,
     der_bytes: whole.length,
   };
 }
 
 /**
- * The §6 validation sequence as data: what is checked, in what order, comparing
- * what against what, and which clause requires it.
- *
- * The UI renders this as the decision log — DESIGN.md calls the log the
- * signature move — and it doubles as the readable answer to "how do I validate
- * one of these myself?". Order matters and is the reference implementation's.
+ * The §7 validation sequence as data: what is checked, in what order, comparing
+ * what against what, and which clause requires it. Order matters and is
+ * `validateCertificate`'s.
  */
 export const VALIDATION_STEPS = Object.freeze([
   { n: 1, check: 'parse',              section: null,
     question: 'Is this well-formed DER carrying an X.509 certificate?',
     compares: 'PEM base64 -> DER -> ASN.1 SEQUENCE',
     on_failure: 'ERR_MALFORMED_PEM' },
-  { n: 2, check: 'critical_extensions', section: '6',
+  { n: 2, check: 'critical_extensions', section: '7.1',
     question: 'Does it carry a critical extension this validator cannot honour?',
-    compares: 'each ext.critical OID against the recognised set',
+    compares: 'each ext.critical OID against the recognised set, the two profile extensions included',
     on_failure: 'ERR_UNKNOWN_CRITICAL_EXT',
     why: 'RFC 5280 §4.2 — a validator MUST reject what it cannot understand but is told it must obey.' },
-  { n: 3, check: 'subject_cn',         section: '6',
-    question: 'Does the certificate name the agent the metadata claims?',
-    compares: 'subject CN vs metadata agent_id',
-    on_failure: 'ERR_SUBJECT_MISMATCH',
-    why: 'Binds the X.509 identity to the separate authorisation document (§7).' },
-  { n: 4, check: 'not_self_signed',    section: '6.1',
+  { n: 3, check: 'subject_cn',         section: '7.2',
+    question: 'Does the certificate name the agent the document claims, as a UUID?',
+    compares: 'subject CN vs the restated agent_id',
+    on_failure: 'ERR_SUBJECT_MISMATCH / ERR_AGENT_ID_FORMAT',
+    why: 'Every restatement of an identifier must equal the subject CN; none is advisory.' },
+  { n: 4, check: 'not_self_signed',    section: '7.3',
     question: 'Was it issued by someone, or did it issue itself?',
     compares: 'full subject DN vs full issuer DN',
     on_failure: 'ERR_SELF_SIGNED',
     why: 'A self-signed agent certificate is an agent asserting its own authority.' },
-  { n: 5, check: 'signature',          section: '6',
+  { n: 5, check: 'profile',            section: '7.1',
+    question: 'Is it shaped as the profile requires?',
+    compares: 'digest ≥ SHA-256; basicConstraints CA:FALSE; keyUsage critical digitalSignature only; serial ≥ 64 bits',
+    on_failure: 'ERR_WEAK_SIGNATURE / ERR_BASIC_CONSTRAINTS / ERR_KEY_USAGE / ERR_SERIAL_ENTROPY' },
+  { n: 6, check: 'signature',          section: '7',
     question: 'Did the CA actually sign these bytes?',
-    compares: 'RSA-SHA256 over tbsCertificate against the CA public key',
+    compares: 'the CA public key against the signature over tbsCertificate (ECDSA, RSA or Ed25519)',
     on_failure: 'ERR_FORGED_ISSUER / ERR_CHAIN_INVALID' },
-  { n: 6, check: 'name_constraints',   section: '6',
+  { n: 7, check: 'name_constraints',   section: '7.1',
     question: 'Was the CA permitted to issue for this name?',
     compares: 'subject RDN sequence against the CA permitted/excluded subtrees',
     on_failure: 'ERR_NAME_CONSTRAINT',
-    why: 'RFC 5280 §4.2.1.10. A valid signature says the CA DID issue it; the constraint '
-       + 'says whether it MAY. Skipping this makes a validator weaker than the spec.' },
-  { n: 7, check: 'validity_window',    section: '6',
+    why: 'RFC 5280 §4.2.1.10. A valid signature says the CA DID issue it; the constraint says whether it MAY.' },
+  { n: 8, check: 'validity_window',    section: '7',
     question: 'Is it being used inside its lifetime?',
     compares: 'now against notBefore and notAfter',
     on_failure: 'ERR_CERT_EXPIRED' },
-  { n: 8, check: 'key_strength',       section: '6',
-    question: 'Is the public key strong enough?',
-    compares: 'RSA modulus bit length against the 2048-bit floor',
-    on_failure: 'ERR_KEY_TOO_SMALL',
-    why: 'Measured from the modulus, so a certificate misstating its own key size cannot pass.' },
+  { n: 9, check: 'key_strength',       section: '7.1',
+    question: 'Does the public key provide 128-bit security?',
+    compares: 'RSA modulus ≥ 3072, or P-256 / P-384 / Ed25519, measured from the key',
+    on_failure: 'ERR_KEY_TOO_SMALL' },
+  { n: 10, check: 'revocation_source', section: '14.4',
+    question: 'Does it say where its revocation state lives?',
+    compares: 'cRLDistributionPoints, or authorityInfoAccess with id-ad-ocsp',
+    on_failure: 'ERR_NO_REVOCATION_SOURCE' },
+  { n: 11, check: 'agent_template',    section: '8.2',
+    question: 'Does it carry the nine template members, as JCS, critical, subject equal to the CN?',
+    compares: 'the Agent Template extension against Table 5, and its bytes against its own canonical form',
+    on_failure: 'ERR_TEMPLATE_EXT_MISSING / ERR_TEMPLATE_EXT_INVALID / ERR_TTL_TOO_LONG',
+    why: 'Parsed only after the signature verified: until then the extension is attacker input.' },
+  { n: 12, check: 'agent_spawn',       section: '10.5',
+    question: 'If it has a parent, does the CA attest which one, when, and under what nonce?',
+    compares: 'the Agent Spawn extension against Table 6',
+    on_failure: 'ERR_SPAWN_EXT_INVALID / ERR_PARENT_MISMATCH' },
+  { n: 13, check: 'validity_within_ttl', section: '9.3',
+    question: 'Is the certificate no longer-lived than its own template says?',
+    compares: 'notAfter − notBefore in seconds against ttl_seconds',
+    on_failure: 'ERR_VALIDITY_EXCEEDS_TTL' },
 ]);

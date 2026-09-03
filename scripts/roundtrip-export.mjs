@@ -11,30 +11,22 @@ import { runPipeline } from '../src/pipeline.js';
 
 const root = new URL('..', import.meta.url).pathname;
 const document = await buildDefaultDocument();
-const result = await runPipeline({ document });
+const result = await runPipeline({ document: JSON.parse(JSON.stringify(document)) });
 
 if (result.verdict !== 'PASS') {
   console.error(`refusing to export a document this playground itself denies: ${result.error_code}`);
   process.exit(1);
 }
 
-// The export carries the pipeline result PLUS the fields Python needs to rebuild
-// setup_keys.py's layout: private keys and the policy-update envelope, which the
+// The export carries the pipeline result PLUS the fields Python needs: private
+// keys, the policy envelope and the Registry's version in force, which the
 // display-oriented result does not repeat.
 const out = {
   ...result,
   chain: document.chain,
   authorities: document.authorities,
-  policy_update: document.policy_update,
-  policy_doc: document.policy_doc,
-  existing_cert: document.existing_cert,
-  owner_sig: document.owner_sig,
-  pa_sig: document.pa_sig,
-  // The §9.4 storage envelope. Omitted previously, which meant the round-trip
-  // could not check the content hash at all — it silently had nothing to
-  // compare against, and a check with no input is not a check.
+  policy: document.policy,
   current_policy_version: document.current_policy_version,
-  policy_content_hash: document.policy_content_hash,
   crl: document.crl,
 };
 mkdirSync(root + 'dist', { recursive: true });

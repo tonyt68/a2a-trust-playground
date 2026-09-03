@@ -55,8 +55,15 @@ for (const name of ['favicon-32.png', 'shield-64.png']) {
   const b64 = readFileSync(`${root}assets/${name}`).toString('base64');
   html = html.replaceAll(`./assets/${name}`, `data:image/png;base64,${b64}`);
 }
+// A function replacer, not a template-string replaceValue: `String.replace`
+// treats a STRING replaceValue as a pattern language ($&, $`, $', $1, $$...),
+// and minified JS can coincidentally contain those two-character sequences
+// (a variable minified to `$` immediately before `&&` produces `$&`, which
+// means "re-insert the whole match" — the placeholder tag came back INSIDE
+// the bundle and silently corrupted it). A function's return value is used
+// verbatim, with no pattern language at all.
 html = html.replace('<script type="module" src="./src/app.js"></script>',
-  `<script type="module">${js}</script>`);
+  () => `<script type="module">${js}</script>`);
 
 /**
  * CSP by HASH, not nonce. A static file served from GitHub Pages cannot mint a
@@ -90,11 +97,11 @@ html = html.replace('<!DOCTYPE html>', `<!DOCTYPE html>
 <!--
   A2A Trust Playground — ${version}
   built    ${built}
-  draft    draft-tonyai-a2a-trust-02
+  draft    draft-tonyai-a2a-trust-03
   source   ${REPO}
 
   This file is minified because it is a runtime artifact. The readable
-  implementation — commented, modular, with 357 tests — is in the repository
+  implementation — commented, modular, tested — is in the repository
   above. If you are here to learn how to validate one of these chains, read that
   instead; there is nothing to learn from the bundle below.
 -->`);

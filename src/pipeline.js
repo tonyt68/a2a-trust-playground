@@ -1,79 +1,86 @@
 /**
  * The nine-stage validation pipeline.
  *
- * Ordered; any failure is a DENY and stops the run. This mirrors
- * `service.py`'s write_event chain, minus the two stages that require a server
- * (replay prevention §16.2 and Cedar policy evaluation §9) — both are named on
- * the page under Stated Limits rather than quietly counted as done.
+ * Ordered; any failure is a DENY and stops the run.
  *
- *   1  agent id format          implementation hardening
- *   2  X.509 identity + state   §6, §10.4
- *   3  revocation + TTL         §12
- *   4  dual signature           §9.3
- *   5  policy field guard       §9.3, §7.1
- *   6  required fields          §9.3
- *   7  authorization bounds     §7, §8.1
- *   8  scope containment        §8.3
- *   9  audit chain append       §16.6
+ *   1  agent id format          §7.2
+ *   2  X.509 identity           §7, §7.1, §8.2, §10.5, §9.3, §12.1, §12.4
+ *   3  revocation               §14
+ *   4  dual signature           §3.1, §11.3, §9.2
+ *   5  policy field guard       §11.4
+ *   6  required fields          §11.4, §11.6
+ *   7  spawn rule, grants       §10.1, §10.2, §13
+ *   8  scope containment        §10.3
+ *   9  audit chain append       §19.7
  *
  * ── The stages array IS the decision log ───────────────────────────────────
  *
  * The UI renders `stages`, the JSON export carries `stages`, and both come from
- * this one array — so the log and the export can never disagree. DESIGN.md is
- * explicit that the log matters more than the diagram; this is why it is data
- * rather than console output.
+ * this one array — so the log and the export can never disagree.
  *
  * ── Fail-closed means the catch block too ──────────────────────────────────
  *
  * Every stage runs inside a boundary that converts an unexpected throw into
- * ERR_INTERNAL (§13.1). A validator that crashes must DENY, not fall through to
+ * ERR_INTERNAL (§15.1). A validator that crashes must DENY, not fall through to
  * a verdict that was initialised optimistically — so `verdict` starts as DENY
  * and is only set to PASS after all nine stages have actually passed.
+ *
+ * ── Where authority is read from ───────────────────────────────────────────
+ *
+ * Every bound is read from a certificate extension after that certificate has
+ * verified to the anchor (§8.2, §10.5). The chain document contributes the
+ * certificates, the identifiers it RESTATES (which must agree with the
+ * certificates, §7.2, §10.5), the scopes each agent requests, the revocation
+ * state, the audit chain, and the two envelopes. It asserts no authority of
+ * its own.
  */
 
 import { DenyError } from './errors.js';
-import { validateUuid4, validateTimestamp } from './validate-input.js';
-import { validateCertificate, parseCertificate } from './x509.js';
+import { validateUuid, assertKnownKeys } from './validate-input.js';
+import { validateCertificate, validateAnchor, subjectCN } from './x509.js';
 import { validatePolicyUpdate, isPolicyUpdate } from './policy.js';
 import {
-  assertNotRevoked, assertActive, parseAuthorizationBounds,
-  assertMaySpawn, assertScopeSubset,
+  assertNotRevoked, assertSpawnPermitted, assertScopeSubset, validateGrant,
 } from './bounds.js';
 import { AuditChain } from './audit-chain.js';
 
-export const DRAFT = 'draft-tonyai-a2a-trust-02';
+export const DRAFT = 'draft-tonyai-a2a-trust-03';
 
-/** Stages the playground does not implement, named rather than skipped (AC-3). */
+/**
+ * Things the draft assigns to a party this page is not, named rather than
+ * skipped. Everything else in the draft that a relying party does, this page
+ * does.
+ */
 export const NOT_APPLICABLE = Object.freeze([
-  { check: 'replay_prevention', section: '16.2',
-    reason: 'requires a nonce store and a request lifecycle; a stateless page has neither' },
-  { check: 'cedar_policy_evaluation', section: '9',
-    reason: 'requires a policy engine; the playground enforces static bounds only' },
+  { check: 'max_children_enforcement', section: '10.2',
+    reason: 'the Registry holds the count and enforces MaxChildren atomically at spawn time; this page checks the document for consistency with the cap and does not present that as enforcement' },
+  { check: 'policy_engine_gate', section: '11.7',
+    reason: 'step 2 is a policy engine the Policy Authority consults before countersigning; this page verifies the countersignature and the static bounds, not the engine' },
 ]);
 
 const STAGE_NAMES = Object.freeze({
   1: 'agent_id_format', 2: 'x509_identity', 3: 'revocation',
   4: 'dual_signature', 5: 'policy_field_guard', 6: 'required_fields',
-  7: 'authorization_bounds', 8: 'scope_subset', 9: 'audit_chain',
+  7: 'spawn_rule', 8: 'scope_subset', 9: 'audit_chain',
 });
 
+/** Node and metadata members the chain document may carry. Anything else is refused. */
+const KNOWN_NODE_FIELDS = new Set(['role', 'cert_pem', 'key_pem', 'metadata', 'requested_scopes']);
+const KNOWN_AGENT_METADATA = new Set(['agent_id', 'parent_agent_id']);
+const KNOWN_ANCHOR_METADATA = new Set(['subject']);
+
 /**
- * Record one stage outcome, once.
- *
- * Idempotent by stage number: the success path and the failure path both replay
- * the sub-stages that completed inside the §9.3 group, and a stage recorded
- * twice would show up twice in the decision log — which is the log lying about
- * how many checks ran.
+ * Record one stage outcome, once. Idempotent by stage number: a DENY always
+ * wins over an already-recorded PASS, and an ADVISORY over a PASS, so a
+ * refusal or a warning found after an optimistic sub-check is never swallowed.
  */
 function record(stages, n, section, result, detail, subject = null) {
   const existing = stages.findIndex((s) => s.n === n);
   if (existing !== -1) {
-    // A DENY always wins over an already-recorded PASS for the same stage: the
-    // sub-checks inside the §9.3 group report progress optimistically, and one
-    // of them failing afterwards must not be swallowed by the earlier row.
-    // Dropping it would turn a refusal into a silent pass — the exact failure
-    // mode fail-closed exists to prevent.
-    if (result === 'DENY') stages[existing] = { n, check: STAGE_NAMES[n], section, result, detail, subject };
+    const current = stages[existing].result;
+    if (result === 'DENY' || (result === 'ADVISORY' && current === 'PASS')) {
+      stages[existing] = { n, check: STAGE_NAMES[n], section, result, detail, subject };
+    }
     return;
   }
   stages.push({ n, check: STAGE_NAMES[n], section, result, detail, subject });
@@ -94,23 +101,20 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
   // Pessimistic by construction: only an unbroken run through stage 9 sets PASS.
   let verdict = 'DENY';
   let failure = null;
-  // Same fail-closed reasoning as the CRL below: an absent audit log is not an
-  // empty one. §16.6 requires tamper-evidence, and a document that simply omits
-  // the chain has no evidence to be tampered with.
+  /** SHOULD-level findings (§10.3 child TTL). Reported, never a DENY. */
+  const advisories = [];
   const crlPresent = document?.crl !== undefined && document?.crl !== null;
   const auditMissing = document?.audit === undefined || document?.audit === null;
   // The refusal for a missing audit log is raised INSIDE the walk, not here:
   // `runPipeline` never throws, it returns a DENY, and the audit chain is what
-  // records that refusal. So the chain is constructed either way and the
-  // document's own absence of one is reported through the normal path.
+  // records that refusal.
   const audit = AuditChain.fromJSON(auditMissing ? { chain: [] } : document.audit);
-  /** Sub-checks inside the §9.3 group report here as they complete. */
+  /** Sub-checks inside the policy group report here as they complete. */
   const completed = [];
   /**
-   * The per-subject walk: anchor, then each agent, then the relationships
-   * between them. `stages` answers "which of the nine checks ran"; `walk`
-   * answers "how far down the chain did we get before something refused",
-   * which is what someone who just edited the child needs.
+   * The per-subject walk: anchor, each agent, the grant, the delegation, the
+   * policy, the audit. `stages` answers "which of the nine checks ran"; `walk`
+   * answers "how far down the chain did we get before something refused".
    */
   const walk = [];
   const step = (subject, result, detail) => {
@@ -124,11 +128,14 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
     if (!chain || chain.length === 0) {
       throw new DenyError('ERR_SCHEMA_VIOLATION', 'document carries no chain');
     }
+    for (const node of chain) {
+      if (node === null || typeof node !== 'object' || Array.isArray(node)) {
+        throw new DenyError('ERR_SCHEMA_VIOLATION', 'every chain node must be an object');
+      }
+      assertKnownKeys(node, KNOWN_NODE_FIELDS, 'a chain node');
+    }
 
-    // EXACTLY one trust anchor. `find` silently takes the first and ignores the
-    // rest, so a document with two CAs validated cleanly against whichever
-    // happened to be first — a reader of that JSON could not tell which anchor
-    // the result depended on. A chain with an ambiguous root has no answer to
+    // EXACTLY one trust anchor. A chain with an ambiguous root has no answer to
     // "who vouched for this", so it is refused rather than resolved.
     const anchors = chain.filter((n) => n.role === 'ca');
     if (anchors.length === 0 || !anchors[0]?.cert_pem) {
@@ -139,22 +146,12 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
         `document carries ${anchors.length} trust anchors — exactly one is permitted`);
     }
     const anchor = anchors[0];
+    assertKnownKeys(anchor.metadata, KNOWN_ANCHOR_METADATA, 'the trust anchor metadata');
 
     const agents = chain.filter((n) => n.role === 'agent');
     if (agents.length === 0) {
       throw new DenyError('ERR_SCHEMA_VIOLATION', 'document carries no agent nodes');
     }
-
-    // One entry per identity. Duplicates let the same agent be counted twice
-    // when tallying siblings against max_children, and make "which node is this
-    // decision about" unanswerable.
-    const ids = agents.map((n) => n?.metadata?.agent_id);
-    const duplicated = ids.filter((id, i) => id !== undefined && ids.indexOf(id) !== i);
-    if (duplicated.length) {
-      throw new DenyError('ERR_SCHEMA_VIOLATION',
-        `chain contains the same agent more than once: ${[...new Set(duplicated)].join(', ')}`);
-    }
-
     // Unknown roles are refused rather than ignored — silently skipping a node
     // means a chain can carry entries nothing ever validates.
     const strays = chain.filter((n) => n?.role !== 'ca' && n?.role !== 'agent');
@@ -162,281 +159,327 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
       throw new DenyError('ERR_SCHEMA_VIOLATION',
         `chain contains ${strays.length} node(s) with an unrecognised role`);
     }
+    for (const node of agents) assertKnownKeys(node.metadata, KNOWN_AGENT_METADATA, 'agent metadata');
 
-    /**
-     * Walk the chain SUBJECT BY SUBJECT: the anchor, then each agent in order,
-     * running that node's checks to completion before moving on.
-     *
-     * The alternative — sweep every node through stage 1, then every node
-     * through stage 2 — is what this used to do, and it answers the wrong
-     * question. Break the child's certificate and it reported "IDENTITY
-     * refused" without saying whose. Walking per subject reports
-     * "anchor ok, parent ok, CHILD refused", which is what someone who just
-     * edited the child actually needs to know.
-     *
-     * It is also the closer reading of the reference implementation:
-     * service.py validates ONE agent through the full chain of stages per
-     * request, not all agents through one stage at a time.
-     */
-    const nodeChecks = async (node, label) => {
-      const meta = node.metadata;
-      validateUuid4(meta?.agent_id, 'agent_id');
-      // §7.1 carries the identity THREE times — `subject`, `agent_id`,
-      // `agent_uuid`. All three are in the owner_sig projection, so a mismatch
-      // inside `existing_cert` breaks the signature. Nothing signs the CHAIN
-      // copy, so a mismatch there was silent: `subject` could name a different
-      // agent than the certificate was issued to and the document validated.
-      // Three names for one identity means all three must agree, or the
-      // document does not have one identity.
-      for (const field of ['agent_uuid', 'subject']) {
-        if (meta[field] !== meta.agent_id) {
-          throw new DenyError('ERR_SCHEMA_VIOLATION',
-            `${field} and agent_id disagree — an agent has exactly one identity`);
-        }
-      }
-      // §9.2 matches policy submitters against the template's owner with `===`.
-      // A non-string owner cannot match anything, so it would have failed
-      // closed — but only by accident, and only on the policy path. A typed
-      // field is checked because it is typed, not because something downstream
-      // happens to survive it.
-      if (typeof meta.owner !== 'string' || meta.owner.length === 0) {
-        throw new DenyError('ERR_SCHEMA_VIOLATION', 'owner must be a non-empty string');
-      }
-      if (typeof meta.org_id !== 'string' || meta.org_id.length === 0) {
-        throw new DenyError('ERR_SCHEMA_VIOLATION', 'org_id must be a non-empty string');
-      }
-      if (meta.created_at) {
-        validateTimestamp(meta.created_at, 'created_at');
-        // A certificate that has not been issued yet cannot be relied on. X.509
-        // notBefore covers the certificate; nothing covered the METADATA's own
-        // claim, so an agent could assert it was created in 2099 and still
-        // validate — the two would simply disagree, unnoticed.
-        if (new Date(meta.created_at).getTime() > now.getTime()) {
-          throw new DenyError('ERR_TIMESTAMP_FORMAT', 'created_at is in the future');
-        }
-      }
-      if (meta.expires_at) validateTimestamp(meta.expires_at, 'expires_at');
-      record(stages, 1, null, 'PASS', `${label}: agent_id is a well-formed UUID4`, label);
+    // §12.1 — one identity, one certificate. Two nodes naming one subject are
+    // refused BOTH, before either is validated.
+    const ids = agents.map((n) => n?.metadata?.agent_id);
+    const duplicated = [...new Set(ids.filter((id, i) => id !== undefined && ids.indexOf(id) !== i))];
+    if (duplicated.length) {
+      const e = new DenyError('ERR_DUPLICATE_SUBJECT',
+        `the chain presents more than one certificate for ${duplicated.map((d) => String(d).slice(0, 8)).join(', ')}… — both are refused`);
+      // Attributed to the identity that was doubled, so the walk names it.
+      const first = agents.find((n) => n?.metadata?.agent_id === duplicated[0]);
+      e.subject = first?.metadata?.parent_agent_id ? 'CHILD AGENT' : 'PARENT AGENT';
+      step(e.subject, 'DENY', e.detail);
+      throw e;
+    }
 
-      await validateCertificate({
-        certPem: node.cert_pem, caPem: anchor.cert_pem, agentId: meta.agent_id, now,
-      });
-      assertActive(meta);
-      record(stages, 2, '6', 'PASS',
-        `${label}: certificate verifies to the anchor, state is ${meta.state}`, label);
-
-      assertNotRevoked({ agentId: meta.agent_id, crl, metadata: meta, now });
-      record(stages, 3, '12', 'PASS', `${label}: not revoked, not disabled, TTL current`, label);
-
-      // §9.2 scopes authority to "the organization that signed the template",
-      // and §11 puts cross-organisational trust behind federation this document
-      // has no way to express. A child declaring a different org_id than its
-      // parent is therefore claiming a delegation the draft does not define —
-      // and it validated cleanly, because org_id was only ever compared on the
-      // policy path, never between a parent and the child it spawned.
-      if (meta.parent_agent_id) {
-        const parentNode = agents.find((n) => n.metadata?.agent_id === meta.parent_agent_id);
-        if (parentNode && parentNode.metadata.org_id !== meta.org_id) {
-          throw new DenyError('ERR_ORG_MISMATCH',
-            `${label}: org_id "${meta.org_id}" differs from its parent's "${parentNode.metadata.org_id}"`);
-        }
-      }
-
-      boundsByAgent.set(meta.agent_id, parseAuthorizationBounds(meta));
-      record(stages, 7, '7', 'PASS',
-        `${label}: bounds parsed — ${boundsByAgent.get(meta.agent_id).allowed_scopes.length} scope(s), `
-        + `max_children ${boundsByAgent.get(meta.agent_id).max_children}`, label);
-    };
-
-    // §13.1 Fail Closed. `document.crl ?? { revoked: [], disabled: [] }` read as
-    // a harmless default and was the opposite: a document that OMITS the CRL is
-    // a document whose revocation status is unknown, and substituting an empty
-    // CRL answers "nothing is revoked" to a question nobody could answer.
-    // Deleting one key turned every revocation check into a pass.
-    //
-    // An EMPTY crl is fine and means "nothing is revoked". A MISSING one means
-    // "we do not know", and the two must not be the same value.
+    // §15.1 Fail Closed. An EMPTY crl is fine and means "nothing is revoked".
+    // A MISSING one means "we do not know", and the two must not be the same
+    // value. Same for the audit chain: absent is not empty.
     if (auditMissing) {
       throw new DenyError('ERR_SCHEMA_VIOLATION',
-        'document carries no audit chain — integrity cannot be established (§16.6)');
+        'document carries no audit chain — integrity cannot be established (§19.7)');
     }
     if (!crlPresent) {
       throw new DenyError('ERR_SCHEMA_VIOLATION',
-        'document carries no crl — revocation status cannot be determined (§13.1)');
+        'document carries no crl — revocation status cannot be determined (§15.1)');
     }
     const crl = document.crl;
-    const boundsByAgent = new Map();
 
-    // The anchor first: everything else is measured against it.
-    parseCertificate(anchor.cert_pem);
-    // §12 revocation applied only to agent ids, so a CRL naming the ANCHOR was
-    // accepted and ignored — the one revocation that voids everything beneath it
-    // was the one revocation with no effect. Checked before any agent, because
-    // if the anchor is revoked no agent's verification means anything.
-    const anchorSubject = anchor.metadata?.subject;
-    const revokedList = Array.isArray(document.crl.revoked) ? document.crl.revoked : [];
-    const disabledList = Array.isArray(document.crl.disabled) ? document.crl.disabled : [];
+    // ── The anchor first: everything else is measured against it ───────────
+    const caCert = await validateAnchor(anchor.cert_pem, { now });
+    // §14 — a CRL naming the ANCHOR voids everything beneath it, so it is
+    // checked before any agent. Matched against the CERTIFICATE's own subject
+    // CN, never against the document's unverified restatement of it (§7.2) —
+    // an attacker cannot dodge a CRL entry by editing `metadata.subject`.
+    const anchorSubject = subjectCN(caCert);
+    const revokedList = Array.isArray(crl.revoked) ? crl.revoked : [];
+    const disabledList = Array.isArray(crl.disabled) ? crl.disabled : [];
     if (anchorSubject && (revokedList.includes(anchorSubject) || disabledList.includes(anchorSubject))) {
       throw new DenyError('ERR_AGENT_REVOKED',
-        'the trust anchor is revoked — every certificate beneath it is void (§12)');
+        'the trust anchor is revoked — every certificate beneath it is void (§14)');
     }
-    record(stages, 2, '6', 'PASS', 'trust anchor parses and is self-signed', 'TRUST ANCHOR');
+    record(stages, 2, '7', 'PASS', 'trust anchor is a self-signed CA: CA:TRUE, keyCertSign, P-256 or stronger', 'TRUST ANCHOR');
     step('TRUST ANCHOR', 'PASS', 'self-signed, in no trust store, name-constrained');
 
+    /** subject -> { template, spawn, notAfter, node, label } — every bound comes from here. */
+    const byId = new Map();
+
+    /**
+     * Walk the chain SUBJECT BY SUBJECT: each agent's checks run to completion
+     * before the next, so a refusal names WHOSE certificate failed.
+     */
+    const nodeChecks = async (node, label) => {
+      const meta = node.metadata ?? {};
+      validateUuid(meta.agent_id, 'agent_id');
+      const claimedParent = meta.parent_agent_id ?? null;
+      if (claimedParent !== null) validateUuid(claimedParent, 'parent_agent_id');
+      record(stages, 1, '7.2', 'PASS', `${label}: agent_id is a well-formed RFC 9562 UUID`, label);
+
+      const r = await validateCertificate({
+        certPem: node.cert_pem, caCert, agentId: meta.agent_id, now, role: 'agent',
+      });
+
+      // §10.5 — a child's certificate carries the Agent Spawn extension and a
+      // root's does not; the parent the chain names must be the parent the CA
+      // attested. Every restatement must agree (§7.2), so the document's
+      // parent_agent_id is checked against the certificate's, never trusted
+      // over it.
+      if (!r.spawn && claimedParent !== null) {
+        throw new DenyError('ERR_SPAWN_EXT_INVALID',
+          `${label}: the chain names a parent but the certificate carries no Agent Spawn extension`);
+      }
+      if (r.spawn && claimedParent === null) {
+        throw new DenyError('ERR_PARENT_MISMATCH',
+          `${label}: the certificate carries an Agent Spawn extension but the chain presents this agent as a root`);
+      }
+      if (r.spawn && r.spawn.parent_agent_id !== claimedParent) {
+        throw new DenyError('ERR_PARENT_MISMATCH',
+          `${label}: the certificate attests parent ${r.spawn.parent_agent_id.slice(0, 8)}…, the chain names ${claimedParent.slice(0, 8)}…`);
+      }
+      byId.set(meta.agent_id, {
+        template: r.template, spawn: r.spawn, notAfter: r.cert.notAfter.value, node, label,
+      });
+      record(stages, 2, '7', 'PASS',
+        `${label}: certificate verifies to the anchor; template${r.spawn ? ' and spawn provenance' : ''} attested by the CA`, label);
+
+      assertNotRevoked({ agentId: meta.agent_id, crl });
+      record(stages, 3, '14', 'PASS', `${label}: not revoked, not DISABLED at the Registry`, label);
+    };
+
+    // Roots first, then children, so a child's parent is known when it is reached.
     const ordered = [...agents].sort((a, b) =>
       (a.metadata?.parent_agent_id ? 1 : 0) - (b.metadata?.parent_agent_id ? 1 : 0));
+    let childN = 0;
     for (const node of ordered) {
-      const label = node.metadata?.parent_agent_id ? 'CHILD AGENT' : 'PARENT AGENT';
+      const isChild = Boolean(node.metadata?.parent_agent_id);
+      const label = isChild ? (++childN > 1 ? `CHILD AGENT ${childN}` : 'CHILD AGENT') : 'PARENT AGENT';
       try {
         await nodeChecks(node, label);
-        const b = boundsByAgent.get(node.metadata.agent_id);
+        const t = byId.get(node.metadata.agent_id).template;
         step(label, 'PASS',
-          `identity, certificate, standing and bounds all check out · ${b.allowed_scopes.join(', ') || 'no scopes'}`);
+          `identity, certificate, template and standing all check out · ${t.allowed_scopes.join(', ')}`);
       } catch (e) {
         if (e instanceof DenyError) { e.subject = label; step(label, 'DENY', e.detail || e.title); }
         throw e;
       }
     }
 
-    // ── Stages 4-6 — dual signature, field guard, required fields (§9.3) ───
+    // §10.5 — every attested parent is in the chain, and no nonce is issued twice.
+    const children = ordered.filter((n) => byId.get(n.metadata.agent_id).spawn);
+    for (const node of children) {
+      const { spawn, label } = byId.get(node.metadata.agent_id);
+      if (!byId.has(spawn.parent_agent_id)) {
+        const e = new DenyError('ERR_PARENT_MISMATCH',
+          `${label}: the certificate names a parent that is not in the chain`);
+        e.subject = label; step(label, 'DENY', e.detail); throw e;
+      }
+    }
+    const nonces = children.map((n) => byId.get(n.metadata.agent_id).spawn.spawn_nonce);
+    if (new Set(nonces).size !== nonces.length) {
+      const e = new DenyError('ERR_NONCE_REUSED', 'two certificates in the chain carry the same spawn_nonce');
+      e.subject = 'CHILD AGENT'; step('CHILD AGENT', 'DENY', e.detail); throw e;
+    }
+
+    // ── Authorities: validated to the anchor before any signature is trusted (§9.2)
     const authorities = document.authorities ?? {};
-    if (isPolicyUpdate(document)) {
-      if (!authorities.owner?.cert_pem || !authorities.pa?.cert_pem) {
-        throw new DenyError('ERR_AUTHORITY_CHAIN',
-          'a policy update requires both the Owner and Policy Authority certificates');
-      }
-      // Chain of custody: the signing authorities must themselves be CA-signed
-      // and current, or a valid signature from a bogus authority would pass.
-      for (const [role, node] of [['Owner', authorities.owner], ['Policy Authority', authorities.pa]]) {
-        try {
-          await validateCertificate({
-            certPem: node.cert_pem, caPem: anchor.cert_pem,
-            agentId: node.common_name, now,
-          });
-        } catch (e) {
-          throw new DenyError('ERR_AUTHORITY_CHAIN', `${role} certificate: ${e.detail || e.message}`);
+    const needAuthorities = isPolicyUpdate(document)
+      || (document.grant !== undefined && document.grant !== null);
+    // Attributed to whichever walk step actually needs the authorities: the
+    // grant if one is present, the policy update otherwise — so a refusal here
+    // still produces a DENY row in `walk`, the way every other block's does.
+    const authoritySubject = (document.grant !== undefined && document.grant !== null)
+      ? 'CROSS-ORG GRANT' : 'POLICY UPDATE';
+    if (needAuthorities) {
+      try {
+        if (!authorities.owner?.cert_pem || !authorities.pa?.cert_pem) {
+          throw new DenyError('ERR_AUTHORITY_CHAIN',
+            'a signed envelope requires both the Owner and Policy Authority certificates');
         }
+        for (const [role, node] of [['Owner', authorities.owner], ['Policy Authority', authorities.pa]]) {
+          try {
+            await validateCertificate({
+              certPem: node.cert_pem, caCert, agentId: node.common_name, now, role: 'authority',
+            });
+          } catch (e) {
+            throw new DenyError('ERR_AUTHORITY_CHAIN', `${role} certificate: ${e.detail || e.message}`);
+          }
+        }
+      } catch (e) {
+        if (e instanceof DenyError) { e.subject = authoritySubject; step(authoritySubject, 'DENY', e.detail || e.title); }
+        throw e;
       }
-      // Sub-checks report as they complete, so a refusal in the middle of the
-      // group still leaves an honest log: the stages that genuinely passed are
-      // shown as PASS, and the log never skips a number.
-      const result = await validatePolicyUpdate({
-        document,
-        ownerCertPem: authorities.owner.cert_pem,
-        paCertPem: authorities.pa.cert_pem,
-        onStage: (n, detail) => completed.push([n, detail]),
-      });
-      for (const [n, detail] of completed) {
-        record(stages, n, n === 4 ? '9.3' : '9.3', 'PASS', detail);
+    }
+
+    // ── Cross-organizational grant (§13) ──────────────────────────────────
+    /** childId -> the grant's allowed_scopes, for the request check in stage 8 */
+    const grantScopes = new Map();
+    const crossOrg = children.filter((n) => {
+      const c = byId.get(n.metadata.agent_id);
+      return c.template.org_id !== byId.get(c.spawn.parent_agent_id).template.org_id;
+    });
+    try {
+      if (crossOrg.length) {
+        if (document.grant === undefined || document.grant === null) {
+          const c = byId.get(crossOrg[0].metadata.agent_id);
+          const p = byId.get(c.spawn.parent_agent_id);
+          throw new DenyError('ERR_GRANT_MISSING',
+            `${c.template.org_id} has issued no grant to ${p.template.org_id} — no implicit trust exists between organizations`);
+        }
+        for (const node of crossOrg) {
+          const c = byId.get(node.metadata.agent_id);
+          const p = byId.get(c.spawn.parent_agent_id);
+          const underGrant = crossOrg.filter((n) => byId.get(n.metadata.agent_id).template.org_id === c.template.org_id).length;
+          const body = await validateGrant({
+            grant: document.grant, childTemplate: c.template, parentTemplate: p.template,
+            ownerCertPem: authorities.owner.cert_pem, paCertPem: authorities.pa.cert_pem,
+            now, spawnsUnderGrant: underGrant,
+          });
+          grantScopes.set(node.metadata.agent_id, body.allowed_scopes);
+        }
+        const g = document.grant.body;
+        step('CROSS-ORG GRANT', 'PASS',
+          `${g.grantor} → ${g.grantee}: signed by the grantor's Owner and Policy Authority, current, within the template; ${crossOrg.length} of max_spawns ${g.max_spawns}`);
+      } else if (document.grant !== undefined && document.grant !== null) {
+        // A grant nothing uses is still checked: an envelope that survives
+        // validation reads as meaningful to whoever handles the document next.
+        // Paired against the agent ITS OWN BODY NAMES, when that agent is
+        // present in this chain — pairing it with an ARBITRARY agent instead
+        // would require the grant to address whichever unrelated agent was
+        // picked, refusing a grant that is simply not the one behind today's
+        // cross-org spawn (e.g. a child later re-parented into one
+        // organization, leaving its old grant in the document unused but
+        // still meaningfully checkable against the agent it actually names).
+        const named = [...byId.values()].find((v) => v.template.subject === document.grant.body?.template);
+        const c = named ?? (byId.get(children[0]?.metadata.agent_id) ?? [...byId.values()][0]);
+        const p = c.spawn ? byId.get(c.spawn.parent_agent_id) : c;
+        await validateGrant({
+          grant: document.grant, childTemplate: c.template, parentTemplate: p.template,
+          ownerCertPem: authorities.owner.cert_pem, paCertPem: authorities.pa.cert_pem,
+          now, spawnsUnderGrant: 0,
+        });
+        step('CROSS-ORG GRANT', 'PASS', 'grant verifies; no spawn in this chain crosses an organization, so it is unused');
+      } else {
+        step('CROSS-ORG GRANT', 'PASS', 'not needed — parent and child are in one organization');
       }
-      if (!completed.some(([n]) => n === 4)) record(stages, 4, '9.3', 'PASS', result.detail);
+    } catch (e) {
+      if (e instanceof DenyError) { e.subject = 'CROSS-ORG GRANT'; step('CROSS-ORG GRANT', 'DENY', e.detail || e.title); }
+      throw e;
+    }
+
+    // ── Stages 4-6 — the policy envelope (§3.1, §11) ──────────────────────
+    if (isPolicyUpdate(document)) {
+      const templates = new Map([...byId].map(([id, v]) => [id, { template: v.template, notAfter: v.notAfter }]));
+      let result;
+      try {
+        result = await validatePolicyUpdate({
+          document, templates, now,
+          ownerCertPem: authorities.owner.cert_pem,
+          paCertPem: authorities.pa.cert_pem,
+          onStage: (n, detail) => completed.push([n, detail]),
+        });
+      } catch (e) {
+        if (e instanceof DenyError) { e.subject = 'POLICY UPDATE'; step('POLICY UPDATE', 'DENY', e.detail || e.title); }
+        throw e;
+      }
+      for (const [n, detail] of completed) record(stages, n, n === 4 ? '11.3' : '11.4', 'PASS', detail);
+      if (!completed.some(([n]) => n === 4)) record(stages, 4, '11.3', 'PASS', result.detail);
       step('POLICY UPDATE', 'PASS', result.detail);
       stages.sort((a, b) => a.n - b.n);
     } else {
-      // Not a policy update: the reference implementation returns "Not a policy
-      // update" and continues. Recorded as PASS with the reason, never omitted —
+      // Not a policy update. Recorded as PASS with the reason, never omitted —
       // a stage that silently vanishes from the log is indistinguishable from
       // one that was forgotten.
-      const detail = 'not a policy update — no signatures to verify';
+      const detail = 'not a policy update — no envelope to verify';
       step('POLICY UPDATE', 'PASS', detail);
-      record(stages, 4, '9.3', 'PASS', detail);
-      record(stages, 5, '9.3', 'PASS', detail);
-      record(stages, 6, '9.3', 'PASS', detail);
+      record(stages, 4, '11.3', 'PASS', detail);
+      record(stages, 5, '11.4', 'PASS', detail);
+      record(stages, 6, '11.4', 'PASS', detail);
     }
 
-    // ── Delegation: the parent-to-child relationship (§8.1, §7) ────────────
-    for (const node of agents) {
-      const parentId = node.metadata.parent_agent_id;
-      if (!parentId) continue;
-      const parentBounds = boundsByAgent.get(parentId);
-      if (!parentBounds) {
-        throw new DenyError('ERR_BOUNDS_UNPARSEABLE', 'a child names a parent that is not in the chain');
-      }
-      const siblings = agents.filter((n) => n.metadata.parent_agent_id === parentId
+    // ── Stage 7 — the two-check spawn rule, from the PARENT's certificate ───
+    try {
+    for (const node of children) {
+      const c = byId.get(node.metadata.agent_id);
+      const parentT = byId.get(c.spawn.parent_agent_id).template;
+      const siblings = children.filter((n) =>
+        byId.get(n.metadata.agent_id).spawn.parent_agent_id === c.spawn.parent_agent_id
         && n.metadata.agent_id !== node.metadata.agent_id).length;
-      assertMaySpawn({ parentBounds, childId: node.metadata.agent_id, currentChildren: siblings });
+      assertSpawnPermitted({ parentTemplate: parentT, childId: node.metadata.agent_id, siblings });
     }
-    record(stages, 7, '7', 'PASS',
-      'DELEGATION: spawn whitelist and max_children satisfied', 'DELEGATION');
+    record(stages, 7, '10.1', 'PASS', children.length
+      ? 'DELEGATION: parent holds spawn, child is in CanSpawn; child count is consistent with MaxChildren (the Registry enforces the cap)'
+      : 'no spawn in this chain', 'DELEGATION');
 
-    // ── Stage 8 — scope containment (§8.3) ─────────────────────────────────
-    let delegations = 0;
+    // ── Stage 8 — scope containment (§10.3) ─────────────────────────────────
+    for (const node of children) {
+      const c = byId.get(node.metadata.agent_id);
+      const parentT = byId.get(c.spawn.parent_agent_id).template;
+      assertScopeSubset(c.template.allowed_scopes, parentT.allowed_scopes, { label: 'child' });
+      // SHOULD, not MUST: reported, never refused.
+      if (c.template.ttl_seconds > parentT.ttl_seconds) {
+        const detail = `${c.label}: ttl_seconds ${c.template.ttl_seconds} exceeds its parent's ${parentT.ttl_seconds} — a delegation that outlives its delegator (SHOULD NOT)`;
+        advisories.push({ section: '10.3', subject: c.label, detail });
+        record(stages, 8, '10.3', 'ADVISORY', detail, 'DELEGATION');
+      }
+    }
     for (const node of agents) {
-      const bounds = boundsByAgent.get(node.metadata.agent_id);
-      const parentId = node.metadata.parent_agent_id;
-      if (parentId) {
-        assertScopeSubset(bounds.allowed_scopes, boundsByAgent.get(parentId).allowed_scopes);
-        delegations += 1;
+      if (node.requested_scopes === undefined) continue;
+      if (!Array.isArray(node.requested_scopes)) {
+        throw new DenyError('ERR_SCHEMA_VIOLATION', 'requested_scopes must be an array of scopes');
       }
-      if (Array.isArray(node.requested_scopes)) {
-        assertScopeSubset(node.requested_scopes, bounds.allowed_scopes);
+      const a = byId.get(node.metadata.agent_id);
+      assertScopeSubset(node.requested_scopes, a.template.allowed_scopes, { label: 'requested' });
+      if (grantScopes.has(node.metadata.agent_id)) {
+        assertScopeSubset(node.requested_scopes, grantScopes.get(node.metadata.agent_id), { label: 'requested (under the grant)' });
       }
     }
-    record(stages, 8, '8.3', 'PASS',
-      delegations > 0
-        ? `DELEGATION: child scopes are a subset of the parent's`
-        : 'no delegation to check; requested scopes are within bounds', 'DELEGATION');
-    step('DELEGATION', 'PASS', delegations > 0
-      ? 'child scopes are a subset of the parent, spawn whitelist and cap satisfied'
-      : 'no delegation in this chain');
+    record(stages, 8, '10.3', 'PASS', children.length
+      ? 'DELEGATION: child scopes are a subset of the parent\'s; requested scopes are within bounds'
+      : 'no delegation to check; requested scopes are within bounds', 'DELEGATION');
+    } catch (e) {
+      if (e instanceof DenyError) { e.subject = 'DELEGATION'; step('DELEGATION', 'DENY', e.detail || e.title); }
+      throw e;
+    }
+    step('DELEGATION', advisories.length ? 'ADVISORY' : 'PASS', advisories.length
+      ? advisories[0].detail
+      : children.length ? 'child scopes are a subset of the parent, spawn rule and cap satisfied' : 'no delegation in this chain');
 
-    // ── Stage 9 — audit integrity (§16.6) ──────────────────────────────────
+    // ── Stage 9 — audit integrity (§19.7) ──────────────────────────────────
     const integrity = await audit.verify();
     if (!integrity.valid) {
-      throw new DenyError('ERR_AUDIT_CHAIN_BROKEN', integrity.reason ?? 'hash chain is broken');
+      const e = new DenyError('ERR_AUDIT_CHAIN_BROKEN', integrity.reason ?? 'hash chain is broken');
+      e.subject = 'AUDIT CHAIN'; step('AUDIT CHAIN', 'DENY', e.detail); throw e;
     }
     await audit.append({ action: 'verify_chain', decision: 'ALLOWED',
       agents: agents.map((n) => n.metadata.agent_id) }, now);
-    record(stages, 9, '16.6', 'PASS', `hash chain valid across ${audit.length} entr(ies)`);
+    record(stages, 9, '19.7', 'PASS', `hash chain valid across ${audit.length} entr(ies)`);
     step('AUDIT CHAIN', 'PASS', `intact across ${audit.length} entr${audit.length === 1 ? 'y' : 'ies'}`);
 
     verdict = 'PASS';
   } catch (error) {
     const deny = error instanceof DenyError
       ? error
-      // §13.1 — anything unexpected is a DENY that says so, not a crash and not
+      // §15.1 — anything unexpected is a DENY that says so, not a crash and not
       // a pass. The original message is deliberately not surfaced: it can echo
       // input, and this page renders everything it reports.
       : new DenyError('ERR_INTERNAL', 'validation could not be completed');
     failure = deny;
 
     const n = deny.stage > 0 ? deny.stage : (stages.length + 1);
-    // Any sub-check that completed before the failure is already recorded by
-    // the onStage callback; sort so the log reads 1..n with no gaps.
     for (const [sn, detail] of completed) {
-      if (sn < n) record(stages, sn, '9.3', 'PASS', detail);
+      if (sn < n) record(stages, sn, sn === 4 ? '11.3' : '11.4', 'PASS', detail);
     }
     record(stages, n, deny.section, 'DENY', deny.detail || deny.title, deny.subject ?? null);
-    if (!deny.subject) {
-      const POLICY_CODES = new Set([
-        'ERR_OWNER_SIG_MISSING', 'ERR_PA_SIG_MISSING', 'ERR_OWNER_SIG_INVALID',
-        'ERR_PA_SIG_INVALID', 'ERR_SINGLE_SIGNATURE', 'ERR_IMMUTABLE_FIELD',
-        'ERR_UNKNOWN_POLICY_FIELD', 'ERR_REQUIRED_FIELD', 'ERR_AUTHORITY_CHAIN',
-        'ERR_POLICY_EXCEEDS_TEMPLATE', 'ERR_SPAWN_EXCEEDS_TEMPLATE',
-        'ERR_OWNER_MISMATCH', 'ERR_ORG_MISMATCH', 'ERR_POLICY_VERSION',
-        'ERR_CONTENT_HASH',
-      ]);
-      const where = POLICY_CODES.has(deny.code) ? 'POLICY UPDATE'
-        : deny.code === 'ERR_AUDIT_CHAIN_BROKEN' ? 'AUDIT CHAIN'
-        : deny.stage === 7 || deny.stage === 8 ? 'DELEGATION'
-        : null;
-      if (where) step(where, 'DENY', deny.detail || deny.title);
-    }
     stages.sort((a, b) => a.n - b.n);
 
-    // The refusal is itself an auditable event. Appending after a failure keeps
-    // the chain a record of decisions rather than a record of successes.
+    // The refusal is itself an auditable event (§10.4). Read the chain from
+    // `document`, not from a binding scoped inside the try block.
     try {
-      // Name the agents this run covered. A refusal row that says only
-      // "DENIED verify_chain" attributes the decision to nobody, which is the
-      // one thing an audit record exists to do.
-      // Read the chain from `document`, not from the `agents` binding: that one
-      // is scoped inside the try block, so referencing it here throws a
-      // ReferenceError which the surrounding catch swallows -- and the refusal
-      // silently stops being recorded. Caught by a unit test asserting the DENY
-      // entry exists, which is exactly the assertion a swallowing catch needs.
       const covered = (document?.chain ?? [])
-        .filter((n) => n.role === 'agent')
+        .filter((n) => n?.role === 'agent')
         .map((n) => n.metadata?.agent_id)
         .filter(Boolean);
       await audit.append({
@@ -446,9 +489,6 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
     } catch { /* an audit failure must not mask the original refusal */ }
   }
 
-  // The walk records stages in chain order, not numeric order — the anchor's
-  // §6 check lands before the first agent's stage 1. Sort once here so the
-  // exported decision log always reads 1..9.
   stages.sort((a, b) => a.n - b.n);
 
   // Stable key order, no undefined, verdict never absent.
@@ -459,6 +499,7 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
     demo_only: true,
     verdict,
     walk,
+    advisories,
     error_code: failure?.code ?? null,
     draft_section: failure?.section ?? null,
     banner: failure ? failure.banner : 'DELEGATION AUTHORIZED',

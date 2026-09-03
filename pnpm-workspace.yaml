@@ -1,2 +1,7 @@
 allowBuilds:
   esbuild: true
+
+# test-exclude (via @vitest/coverage-v8) accepts glob ^10, and glob 10.x is
+# deprecated upstream. The API is unchanged through 13; pin the current release.
+overrides:
+  glob: 13.0.6

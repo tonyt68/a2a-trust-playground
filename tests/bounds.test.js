@@ -1,255 +1,167 @@
 /**
- * Stages 3, 7 and 8 — revocation (§12), authorization bounds (§7, §8.1),
- * scope containment (§8.3).
- *
- * Acceptance criterion 5: over-scoped delegation is refused AT ISSUANCE, and no
- * certificate is minted.
+ * Stages 3, 7 and 8 — revocation (§14), the two-check spawn rule (§10.1), the
+ * MaxChildren consistency check (§10.2), scope containment (§10.3) and the
+ * cross-organizational grant (§13.2).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { assertNotRevoked, assertSpawnPermitted, assertScopeSubset, validateGrant } from '../src/bounds.js';
+import { buildDefaultDocument } from '../src/defaults.js';
+import { signEnvelope, privateKeyFromPem } from '../src/crypto-sign.js';
+import { childOf, parentOf, templateOf, spawnAcrossOrganizations } from '../src/scenarios.js';
 import { DenyError } from '../src/errors.js';
-import {
-  assertNotRevoked, assertActive, AGENT_STATES,
-  parseAuthorizationBounds, assertMaySpawn,
-  assertScopeSubset, assertDelegationPermitted,
-} from '../src/bounds.js';
 
-const A = '8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa';
-const B = 'c669186f-a84b-4d7a-81f3-05880df87114';
-const C = 'd9cdba8d-5ada-485a-bd09-7a392d1f9625';
+const refuses = async (code, promise) => {
+  let caught = null;
+  try { await promise; } catch (e) { caught = e; }
+  expect(caught, 'expected a refusal').toBeInstanceOf(DenyError);
+  expect(caught.code).toBe(code);
+  return caught;
+};
+const throwsCode = (code, fn) => refuses(code, Promise.resolve().then(fn));
 
-const NOW = new Date('2026-08-28T12:00:00Z');
-const META = Object.freeze({
-  state: 'ACTIVE',
-  expires_at: '2026-08-29T12:00:00Z',
-  // §7.1 lists TTL as REQUIRED. The fixture omitted it, and nothing checked —
-  // caught by the red-team pass, which slipped `ttl_seconds: Infinity` through.
-  ttl_seconds: 86400,
-  allowed_scopes: ['read:events'],
-  can_spawn: [A],
-  max_children: 2,
-  authorization_bounds: { allowed_scopes: ['read:events'], can_spawn: [A], max_children: 2 },
+const A = '8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa', B = '019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d';
+
+describe('stage 3 — revocation (§14) and DISABLED (§12.4)', () => {
+  it('passes a clean agent', () => expect(() => assertNotRevoked({ agentId: A, crl: { revoked: [], disabled: [] } })).not.toThrow());
+  it('refuses a revoked agent', () => throwsCode('ERR_AGENT_REVOKED', () => assertNotRevoked({ agentId: A, crl: { revoked: [A], disabled: [] } })));
+  it('refuses a DISABLED template with its own code, and says it is not a revocation', async () => {
+    const e = await throwsCode('ERR_AGENT_DISABLED', () => assertNotRevoked({ agentId: A, crl: { revoked: [], disabled: [A] } }));
+    expect(e.detail).toMatch(/not a revocation/);
+    expect(e.section).toBe('12.4');
+  });
+  it('fails closed on an unreadable or malformed CRL', async () => {
+    await throwsCode('ERR_AGENT_REVOKED', () => assertNotRevoked({ agentId: A, crl: null }));
+    await throwsCode('ERR_AGENT_REVOKED', () => assertNotRevoked({ agentId: A, crl: 'x' }));
+    await throwsCode('ERR_AGENT_REVOKED', () => assertNotRevoked({ agentId: A, crl: { revoked: 'x' } }));
+  });
+  it('revoking the parent does not implicitly revoke the child', () =>
+    expect(() => assertNotRevoked({ agentId: B, crl: { revoked: [A], disabled: [] } })).not.toThrow());
 });
 
-function denies(code, fn) {
-  let thrown;
-  try { fn(); } catch (e) { thrown = e; }
-  expect(thrown, 'expected a DenyError, nothing was thrown').toBeDefined();
-  expect(thrown, `threw ${thrown?.constructor?.name}: ${thrown?.message}`).toBeInstanceOf(DenyError);
-  expect(thrown.code).toBe(code);
-}
-
-describe('stage 3 — revocation and TTL (§12)', () => {
-  const ok = { revoked: [], disabled: [] };
-
-  it('passes a clean agent', () => {
-    expect(() => assertNotRevoked({ agentId: B, crl: ok, metadata: META, now: NOW })).not.toThrow();
+describe('stage 7 — Check 1 from the parent’s certificate (§10.1) and the MaxChildren consistency check (§10.2)', () => {
+  const parent = { permitted_operations: ['spawn', 'read'], can_spawn: [B], max_children: 2, allowed_scopes: ['a:b'] };
+  it('permits a whitelisted child under the cap, with spawn held', () =>
+    expect(() => assertSpawnPermitted({ parentTemplate: parent, childId: B, siblings: 1 })).not.toThrow());
+  it('refuses a parent without spawn — CanSpawn alone is "permitted to spawn specific children and not permitted to spawn"', () =>
+    throwsCode('ERR_SPAWN_NOT_PERMITTED', () => assertSpawnPermitted({ parentTemplate: { ...parent, permitted_operations: ['read'] }, childId: B })));
+  it('refuses a child not in CanSpawn', () =>
+    throwsCode('ERR_CHILD_NOT_WHITELISTED', () => assertSpawnPermitted({ parentTemplate: { ...parent, can_spawn: [] }, childId: B })));
+  it('refuses at the cap, and treats 0 as no children, not unlimited', async () => {
+    await throwsCode('ERR_MAX_CHILDREN', () => assertSpawnPermitted({ parentTemplate: parent, childId: B, siblings: 2 }));
+    await throwsCode('ERR_MAX_CHILDREN', () => assertSpawnPermitted({ parentTemplate: { ...parent, max_children: 0 }, childId: B, siblings: 0 }));
   });
-
-  it('refuses a revoked agent', () =>
-    denies('ERR_AGENT_REVOKED', () => assertNotRevoked({
-      agentId: B, crl: { revoked: [B], disabled: [] }, metadata: META, now: NOW })));
-
-  it('refuses a disabled agent', () =>
-    denies('ERR_AGENT_REVOKED', () => assertNotRevoked({
-      agentId: B, crl: { revoked: [], disabled: [B] }, metadata: META, now: NOW })));
-
-  it('refuses once the TTL has elapsed, without anyone listing it (§12.3)', () =>
-    denies('ERR_TTL_EXPIRED', () => assertNotRevoked({
-      agentId: B, crl: ok, metadata: META, now: new Date('2026-08-30T00:00:00Z') })));
-
-  it('fails closed on an unreadable CRL', () => {
-    for (const crl of [null, 'nope', ['a'], undefined]) {
-      denies('ERR_AGENT_REVOKED', () => assertNotRevoked({ agentId: B, crl, metadata: META, now: NOW }));
-    }
+  it('words the cap as a document-consistency check, not enforcement (§10.2)', async () => {
+    const e = await throwsCode('ERR_MAX_CHILDREN', () => assertSpawnPermitted({ parentTemplate: { ...parent, max_children: 0 }, childId: B }));
+    expect(e.detail).toMatch(/the document names/);
   });
-
-  it('fails closed on a malformed CRL list', () =>
-    denies('ERR_AGENT_REVOKED', () => assertNotRevoked({
-      agentId: B, crl: { revoked: 'B' }, metadata: META, now: NOW })));
-
-  it('fails closed on an unparseable expires_at', () =>
-    denies('ERR_TTL_EXPIRED', () => assertNotRevoked({
-      agentId: B, crl: ok, metadata: { ...META, expires_at: 'soon' }, now: NOW })));
-
-  it('revoking the parent does not implicitly revoke the child', () => {
-    // Revocation is per-agent; the chain walk is what propagates the refusal.
-    expect(() => assertNotRevoked({
-      agentId: B, crl: { revoked: [A], disabled: [] }, metadata: META, now: NOW })).not.toThrow();
-  });
-});
-
-describe('§10.4 — agent state machine', () => {
-  it('permits only ACTIVE', () => {
-    expect(() => assertActive({ state: 'ACTIVE' })).not.toThrow();
-    denies('ERR_AGENT_DISABLED', () => assertActive({ state: 'DISABLED' }));
-    denies('ERR_AGENT_DISABLED', () => assertActive({ state: 'DELETED' }));
-  });
-
-  it('refuses an absent state rather than defaulting to ACTIVE', () => {
-    // The reference implementation defaults a missing state to ACTIVE. That is
-    // a fail-open default; this refuses.
-    denies('ERR_AGENT_DISABLED', () => assertActive({}));
-    denies('ERR_AGENT_DISABLED', () => assertActive(null));
-  });
-
-  it('refuses an unknown state', () =>
-    denies('ERR_AGENT_DISABLED', () => assertActive({ state: 'SUPERUSER' })));
-
-  it('knows the lifecycle', () => expect(AGENT_STATES).toEqual(['ACTIVE', 'DISABLED', 'DELETED']));
-});
-
-describe('stage 7 — parsing authorization bounds (§7)', () => {
-  it('reads the three bound fields', () => {
-    expect(parseAuthorizationBounds(META))
-      .toEqual({ allowed_scopes: ['read:events'], can_spawn: [A], max_children: 2 });
-  });
-
-  it('accepts a document with only the top-level copy', () => {
-    const { authorization_bounds, ...flat } = META;
-    expect(parseAuthorizationBounds(flat).max_children).toBe(2);
-  });
-
-  it('accepts a document with only the nested copy', () => {
-    expect(parseAuthorizationBounds({
-      state: 'ACTIVE', ttl_seconds: 86400,
-      authorization_bounds: META.authorization_bounds,
-    }).max_children).toBe(2);
-  });
-
-  it('refuses unknown metadata fields rather than ignoring them', () => {
-    // Red-team finding: `admin: true` and `rebac_override: true` validated
-    // cleanly. They are inert — nothing reads them — which is exactly why
-    // accepting them silently is wrong: a key that survives validation reads
-    // as meaningful.
-    denies('ERR_SCHEMA_VIOLATION', () =>
-      parseAuthorizationBounds({ ...META, admin: true, rebac_override: true }));
-  });
-
-  it('validates ttl_seconds, a §7.1 REQUIRED field', () => {
-    denies('ERR_FIELD_RANGE', () => parseAuthorizationBounds({ ...META, ttl_seconds: null }));
-    denies('ERR_FIELD_RANGE', () => parseAuthorizationBounds({ ...META, ttl_seconds: 0 }));
-    denies('ERR_FIELD_RANGE', () => parseAuthorizationBounds({ ...META, ttl_seconds: -1 }));
-    denies('ERR_FIELD_RANGE', () => parseAuthorizationBounds({ ...META, ttl_seconds: '86400' }));
-  });
-
-  it('REFUSES when the duplicate copies disagree', () => {
-    // setup_keys.py emits both and service.py reads the nested one. A document
-    // whose copies differ has no single answer; picking one silently is how a
-    // bound gets bypassed.
-    denies('ERR_BOUNDS_UNPARSEABLE', () => parseAuthorizationBounds({
-      ...META, authorization_bounds: { ...META.authorization_bounds, max_children: 99 },
-    }));
-    denies('ERR_BOUNDS_UNPARSEABLE', () => parseAuthorizationBounds({
-      ...META, authorization_bounds: { ...META.authorization_bounds, can_spawn: [B] },
-    }));
-  });
-
-  it('fails closed when a bound is absent', () => {
-    for (const f of ['allowed_scopes', 'can_spawn', 'max_children']) {
-      const meta = { ...META }; delete meta[f];
-      const { [f]: _drop, ...nested } = META.authorization_bounds;
-      denies('ERR_BOUNDS_UNPARSEABLE', () => parseAuthorizationBounds({ ...meta, authorization_bounds: nested }));
-    }
-  });
-
-  it('validates the shape of each bound', () => {
-    denies('ERR_BOUNDS_UNPARSEABLE', () => parseAuthorizationBounds({ ...META, can_spawn: 'x', authorization_bounds: undefined }));
-    denies('ERR_AGENT_ID_FORMAT', () => parseAuthorizationBounds({ ...META, can_spawn: ['agent-a'], authorization_bounds: undefined }));
-    denies('ERR_BOUNDS_UNPARSEABLE', () => parseAuthorizationBounds({ ...META, can_spawn: [A, A], authorization_bounds: undefined }));
-    denies('ERR_FIELD_RANGE', () => parseAuthorizationBounds({ ...META, max_children: -1, authorization_bounds: undefined }));
-    denies('ERR_FIELD_RANGE', () => parseAuthorizationBounds({ ...META, max_children: 1.5, authorization_bounds: undefined }));
-    denies('ERR_FIELD_CHARSET', () => parseAuthorizationBounds({ ...META, allowed_scopes: ['ADMIN'], authorization_bounds: undefined }));
-  });
-
-  it('refuses a non-object', () => {
-    for (const bad of [null, 'x', 42, ['a']]) denies('ERR_BOUNDS_UNPARSEABLE', () => parseAuthorizationBounds(bad));
-  });
-});
-
-describe('stage 7 — the spawn whitelist and max_children (§8.1, §7)', () => {
-  const bounds = { allowed_scopes: ['read:events'], can_spawn: [A], max_children: 2 };
-
-  it('permits a whitelisted child under the cap', () => {
-    expect(() => assertMaySpawn({ parentBounds: bounds, childId: A, currentChildren: 0 })).not.toThrow();
-  });
-
-  it('refuses a child that is not whitelisted', () =>
-    denies('ERR_CHILD_NOT_WHITELISTED', () => assertMaySpawn({
-      parentBounds: bounds, childId: C, currentChildren: 0 })));
-
-  it('refuses at the cap', () =>
-    denies('ERR_MAX_CHILDREN', () => assertMaySpawn({
-      parentBounds: bounds, childId: A, currentChildren: 2 })));
-
-  it('treats max_children 0 as no children, not unlimited', () => {
-    // cert_validator.validate_max_children only enforces when max_c > 0, which
-    // reads a zero cap as unlimited. For a structural bound that is backwards.
-    denies('ERR_MAX_CHILDREN', () => assertMaySpawn({
-      parentBounds: { ...bounds, max_children: 0 }, childId: A, currentChildren: 0 }));
-  });
-
   it('refuses a malformed child id before consulting the whitelist', () =>
-    denies('ERR_AGENT_ID_FORMAT', () => assertMaySpawn({
-      parentBounds: bounds, childId: 'agent-a', currentChildren: 0 })));
+    throwsCode('ERR_AGENT_ID_FORMAT', () => assertSpawnPermitted({ parentTemplate: parent, childId: 'not-a-uuid' })));
 });
 
-describe('stage 8 — scope containment (§8.3)', () => {
+describe('stage 8 — scope containment (§10.3)', () => {
   it('permits an exact match and a proper subset', () => {
-    expect(assertScopeSubset(['read:events'], ['read:events'])).toBe(true);
-    expect(assertScopeSubset(['read:events'], ['read:events', 'write:events'])).toBe(true);
+    expect(assertScopeSubset(['a:b'], ['a:b', 'c:d'])).toBe(true);
+    expect(assertScopeSubset(['c:d', 'a:b'], ['a:b', 'c:d'])).toBe(true);   // order is not significant to comparison
   });
-
-  it('refuses escalation and names the excess scope', () => {
-    let thrown;
-    try { assertScopeSubset(['write:events'], ['read:events']); } catch (e) { thrown = e; }
-    expect(thrown.code).toBe('ERR_SCOPE_ESCALATION');
-    expect(thrown.detail).toContain('write:events');
-    expect(thrown.detail).toContain('read:events');
+  it('refuses escalation and names the excess scope', async () => {
+    const e = await throwsCode('ERR_SCOPE_ESCALATION', () => assertScopeSubset(['a:b', 'x:y'], ['a:b']));
+    expect(e.detail).toMatch(/x:y/);
   });
-
-  it('refuses empty scopes — an agent must declare intent (§16.1)', () =>
-    denies('ERR_EMPTY_SCOPES', () => assertScopeSubset([], ['read:events'])));
-
-  it('has no wildcards, prefixes or hierarchy', () => {
-    // Each of these is a plausible-looking escalation path if a validator gets
-    // clever about scope semantics. A scope is an opaque token.
-    denies('ERR_FIELD_CHARSET', () => assertScopeSubset(['*'], ['read:events']));
-    denies('ERR_SCOPE_ESCALATION', () => assertScopeSubset(['read'], ['read:events']));
-    denies('ERR_SCOPE_ESCALATION', () => assertScopeSubset(['read:events:extra'], ['read:events']));
-    denies('ERR_SCOPE_ESCALATION', () => assertScopeSubset(['admin:all'], ['read:events']));
-    // write does not imply read, and read does not imply write
-    denies('ERR_SCOPE_ESCALATION', () => assertScopeSubset(['read:events'], ['write:events']));
+  it('refuses empty scopes — the empty set satisfies containment vacuously', () =>
+    throwsCode('ERR_EMPTY_SCOPES', () => assertScopeSubset([], ['a:b'])));
+  it('has no wildcards, prefixes, hierarchy or case folding', async () => {
+    await throwsCode('ERR_SCOPE_SYNTAX', () => assertScopeSubset(['admin:*'], ['admin:all']));
+    await throwsCode('ERR_SCOPE_ESCALATION', () => assertScopeSubset(['read:events:extra'], ['read:events']));
+    await throwsCode('ERR_SCOPE_ESCALATION', () => assertScopeSubset(['read:events'], ['write:events']));
+    await throwsCode('ERR_SCOPE_SYNTAX', () => assertScopeSubset(['Read:Events'], ['read:events']));
   });
-
-  it('refuses a partial subset — one bad scope taints the request (A02)', () =>
-    denies('ERR_SCOPE_ESCALATION', () =>
-      assertScopeSubset(['read:events', 'admin:all'], ['read:events'])));
-
-  it('fails closed on unparseable scope sets', () => {
-    denies('ERR_SCHEMA_VIOLATION', () => assertScopeSubset(['read:events'], 'read:events'));
-    denies('ERR_SCHEMA_VIOLATION', () => assertScopeSubset(['read:events'], null));
+  it('fails closed on unparseable scope sets', async () => {
+    await throwsCode('ERR_SCHEMA_VIOLATION', () => assertScopeSubset('a:b', ['a:b']));
+    await throwsCode('ERR_SCHEMA_VIOLATION', () => assertScopeSubset(['a:b'], null));
   });
 });
 
-describe('AC-5 — over-scoped delegation is refused at issuance', () => {
-  it('permits a narrowing delegation', () => {
-    expect(assertDelegationPermitted({
-      parentScopes: ['read:events', 'write:events'], childScopes: ['read:events'],
-    })).toBe(true);
+describe('cross-organizational grants (§13.2)', () => {
+  let base, now;
+  beforeAll(async () => {
+    now = new Date();
+    base = await buildDefaultDocument({ now });
+    await spawnAcrossOrganizations(base, {}, { now });
+  }, 30_000);
+  const clone = () => JSON.parse(JSON.stringify(base));
+  const run = (d, extra = {}) => validateGrant({
+    grant: d.grant, childTemplate: templateOf(childOf(d)), parentTemplate: templateOf(parentOf(d)),
+    ownerCertPem: d.authorities.owner.cert_pem, paCertPem: d.authorities.pa.cert_pem, now, ...extra,
   });
+  const resign = async (d) => {
+    d.grant = await signEnvelope(d.grant.body, await privateKeyFromPem(d.authorities.owner.key_pem),
+      await privateKeyFromPem(d.authorities.pa.key_pem));
+  };
 
-  it('refuses a widening delegation before any certificate exists', () => {
-    // The headline act: the escalation is prevented, not caught afterwards.
-    let thrown;
-    try {
-      assertDelegationPermitted({ parentScopes: ['read:events'], childScopes: ['write:events'] });
-    } catch (e) { thrown = e; }
-    expect(thrown.code).toBe('ERR_SCOPE_ESCALATION');
-    expect(thrown.section).toBe('8.3');
-    expect(thrown.banner).toBe('ERR_SCOPE_ESCALATION · §8.3');
+  it('refuses a grant that is not an envelope, and an envelope with no body', async () => {
+    for (const bad of ['grant', 7, [], null]) {
+      const d = clone(); d.grant = bad;
+      const e = await refuses('ERR_GRANT_INVALID', run(d));
+      expect(e.detail).toMatch(/not an envelope/);
+    }
+    for (const bad of [null, 'body', []]) {
+      const d = clone(); d.grant.body = bad;
+      const e = await refuses('ERR_GRANT_INVALID', run(d));
+      expect(e.detail).toMatch(/body is missing/);
+    }
   });
-
-  it('refuses a child claiming scopes the parent never held', () =>
-    denies('ERR_SCOPE_ESCALATION', () => assertDelegationPermitted({
-      parentScopes: ['read:events'], childScopes: ['read:events', 'admin:all'] })));
+  it('refuses a Policy Authority signature that does not verify — the Owner’s signature reused', async () => {
+    const d = clone(); d.grant.pa_sig = d.grant.owner_sig;
+    const e = await refuses('ERR_GRANT_INVALID', run(d));
+    expect(e.detail).toMatch(/Policy Authority signature/);
+  });
+  it('accepts the grant the scenario issues', async () => {
+    const body = await run(clone());
+    expect(body.grantor).toBe('partner-org');
+    expect(body.grantee).toBe('playground-org');
+  });
+  it('refuses an envelope member the draft does not define, and a content_hash on a grant', async () => {
+    let d = clone(); d.grant.nonce = 'x'; await refuses('ERR_ENVELOPE_MEMBER', run(d));
+    d = clone(); d.grant.content_hash = '00'; await refuses('ERR_ENVELOPE_MEMBER', run(d));
+  });
+  it('refuses a missing, extra, or mistyped field', async () => {
+    let d = clone(); delete d.grant.body.issued_at; await refuses('ERR_GRANT_INVALID', run(d));
+    d = clone(); d.grant.body.signature = 'x'; await refuses('ERR_GRANT_INVALID', run(d));
+    d = clone(); d.grant.body.max_spawns = '3'; await refuses('ERR_GRANT_INVALID', run(d));
+    d = clone(); d.grant.body.max_spawns = null; await refuses('ERR_OBJECT_NOT_FLAT', run(d));
+    d = clone(); d.grant.body.ttl_seconds = 0; await resign(d); await refuses('ERR_GRANT_INVALID', run(d));
+  });
+  it('refuses a grant addressed to the wrong parties or template', async () => {
+    let d = clone(); d.grant.body.grantor = 'someone-else'; await resign(d);
+    expect((await refuses('ERR_GRANT_INVALID', run(d))).detail).toMatch(/grantor/);
+    d = clone(); d.grant.body.grantee = 'someone-else'; await resign(d);
+    expect((await refuses('ERR_GRANT_INVALID', run(d))).detail).toMatch(/grantee/);
+    d = clone(); d.grant.body.template = A; await resign(d);
+    expect((await refuses('ERR_GRANT_INVALID', run(d))).detail).toMatch(/template/);
+  });
+  it('refuses an expired grant, and one dated more than the window in the future; accepts one 59 s ahead', async () => {
+    let d = clone(); d.grant.body.issued_at = new Date(now.getTime() - 7200_000).toISOString(); await resign(d);
+    await refuses('ERR_GRANT_EXPIRED', run(d));
+    d = clone(); d.grant.body.issued_at = new Date(now.getTime() + 61_000).toISOString(); await resign(d);
+    await refuses('ERR_GRANT_EXPIRED', run(d));
+    d = clone(); d.grant.body.issued_at = new Date(now.getTime() + 59_000).toISOString(); await resign(d);
+    await run(d);
+  });
+  it('refuses a grant allowing scopes beyond the template it grants', async () => {
+    const d = clone(); d.grant.body.allowed_scopes = ['read:events', 'admin:all']; await resign(d);
+    await refuses('ERR_GRANT_EXCEEDS_TEMPLATE', run(d));
+  });
+  it('refuses a missing or invalid signature, each by name', async () => {
+    let d = clone(); delete d.grant.pa_sig; await refuses('ERR_GRANT_INVALID', run(d));
+    d = clone(); d.grant.body.max_spawns = 99; await refuses('ERR_GRANT_INVALID', run(d));   // body edited, not re-signed
+  });
+  it('refuses when the document names more agents under the grant than MaxSpawns', async () => {
+    const d = clone(); d.grant.body.max_spawns = 0; await resign(d);
+    await refuses('ERR_MAX_SPAWNS', run(d, { spawnsUnderGrant: 1 }));
+  });
+  it('refuses one key in both roles, and an Owner certificate that does not name the template owner', async () => {
+    let d = clone(); d.authorities.pa = { ...d.authorities.owner };
+    await refuses('ERR_SINGLE_SIGNATURE', run(d));
+    d = clone(); await refuses('ERR_OWNER_CERT_MISMATCH', run(d, { ownerCertPem: d.authorities.pa.cert_pem }));
+  });
 });

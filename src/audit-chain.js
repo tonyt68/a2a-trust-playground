@@ -1,39 +1,24 @@
 /**
- * Tamper-evident audit chain (§16.6) — ported from
- * ietf-a2a-trust-poc/services/mcp_server/audit_chain.py
+ * Tamper-evident audit chain — §19.7.
  *
  * SHA-256 hash chain: each block commits to the previous block's hash, so
  * altering any entry invalidates that block and every block after it. The
  * verifier reports the break AND names the entry, which is the whole point of
- * the "tamper with an audit entry" button.
+ * the "alter an audit entry" button.
  *
- * ── A divergence from setup_keys.py, made deliberately ─────────────────────
- *
- * The reference implementation hashes a block over four fields in
- * AuditChain.append_event and verify_chain:
- *
- *     {index, timestamp, previous_hash, event}
- *
- * but setup_keys.py builds its genesis block over only three, omitting
- * `timestamp`. The two disagree, so the PoC's genesis block does not verify
- * under the PoC's own verifier. Measured against a freshly generated chain:
- *
- *     AuditChain.verify_chain()  ->  (False, 0)
- *
- * tests/test_vectors.py TV-33 hides this with `or len(chain) >= 1`.
- *
- * The playground uses the FOUR-field formula everywhere, genesis included. That
- * is the self-consistent reading, it is what `verify_chain` actually checks, and
- * it means a chain exported from this page verifies under the PoC's Python
- * without modification — which the PoC's own chain does not. Porting the bug
- * faithfully would have meant shipping a chain that reports BROKEN before anyone
- * touches it, making the tamper demonstration meaningless.
+ * §19.7 specifies the preimage: SHA-256 over the canonical form (§11.5, JCS)
+ * of the entry's fields including the previous entry's hash, and excluding the
+ * entry's own hash field. Four fields, one canonical form, the same
+ * `canonicalize` the signatures use. An unspecified preimage is not a detail:
+ * two implementations hashing different field sets each read the other's
+ * chain as broken.
  */
 
 import { canonicalize } from './canonical.js';
 import { DenyError } from './errors.js';
+import { bytesToHex } from './encoding.js';
 
-/** Matches audit_chain.py's `previous_hash` sentinel for the first block. */
+/** The previous_hash of the first block. */
 export const GENESIS_PREVIOUS_HASH = 'genesis';
 
 const encoder = new TextEncoder();
@@ -41,16 +26,12 @@ const encoder = new TextEncoder();
 /** SHA-256 hex, via Web Crypto — available in browsers and in Node. */
 async function sha256Hex(text) {
   const digest = await crypto.subtle.digest('SHA-256', encoder.encode(text));
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+  return bytesToHex(new Uint8Array(digest));
 }
 
 /**
- * The exact preimage audit_chain.py hashes: four fields, `sort_keys=True`, and
- * the DEFAULT separators — ', ' and ': ', not the compact ones used for
- * signatures. Using the signing serializer here would produce a chain that
- * looks right and verifies nowhere.
+ * The preimage of §19.7: the entry's fields, previous hash included, own hash
+ * excluded, in the single canonical form of §11.5.
  */
 export function blockPreimage(block) {
   return canonicalize({
