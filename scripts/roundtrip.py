@@ -56,8 +56,15 @@ SPAWN_OID = x509.ObjectIdentifier("2.25.316124730704531463413455892107752909312"
 TEMPLATE_FIELDS = ["subject", "owner", "org_id", "permitted_operations", "allowed_scopes",
                    "can_spawn", "max_children", "policy_ref", "ttl_seconds"]
 SPAWN_FIELDS = ["parent_agent_id", "spawned_at", "spawn_nonce"]
+SPAWN_OPTIONAL_FIELDS = ["grant_id"]          # present exactly when the spawn crossed organizations (§10.5)
 POLICY_FIELDS = ["subject", "owner", "org_id", "scopes", "spawn_targets", "version",
                  "issued_at", "not_after"]
+GRANT_FIELDS = ["grant_id", "grantor", "grantee", "template", "allowed_scopes", "issued_at", "ttl_seconds", "max_spawns"]
+# §10.4 Table 6 — the audit log entry for a spawn event.
+AUDIT_SPAWN_FIELDS = ["spawning_agent_id", "child_template_id", "requested_scopes", "granted_scopes",
+                      "spawn_nonce", "timestamp", "outcome", "previous_hash", "entry_hash"]
+AUDIT_SPAWN_OPTIONAL_FIELDS = ["grant_id", "reason"]
+GENESIS_PREVIOUS_HASH = "0" * 64
 
 PASS, FAIL = "  ok    ", "  FAIL  "
 results = []
@@ -206,6 +213,11 @@ for aid, cert in certs.items():
     check(f"agent {aid[:8]}… validity {validity}s does not exceed ttl_seconds {obj['ttl_seconds']} (§9.3)",
           validity <= obj["ttl_seconds"])
     check(f"agent {aid[:8]}… ttl_seconds within seven days (§9.3)", 1 <= obj["ttl_seconds"] <= 604800)
+    check(f"agent {aid[:8]}… max_children does not exceed the children can_spawn names (§8.1)",
+          obj["max_children"] <= len(obj["can_spawn"]))
+    serial = cert.serial_number.to_bytes((cert.serial_number.bit_length() + 8) // 8, "big")
+    check(f"agent {aid[:8]}… serial is positive, minimal DER, at most 20 octets (§7.1)",
+          cert.serial_number > 0 and len(serial) <= 20)
     templates[aid] = obj
 
 print("\n§10.5 — the Agent Spawn extension")
@@ -220,7 +232,8 @@ for aid, cert in certs.items():
     if obj is None:
         continue
     check(f"child {aid[:8]}… extension bytes are their own JCS form", jcs(obj) == text)
-    check(f"child {aid[:8]}… carries exactly the three members of Table 6", sorted(obj) == sorted(SPAWN_FIELDS))
+    check(f"child {aid[:8]}… carries the three members of Table 7, and at most grant_id besides",
+          set(SPAWN_FIELDS) <= set(obj) <= set(SPAWN_FIELDS) | set(SPAWN_OPTIONAL_FIELDS))
     check(f"child {aid[:8]}… attested parent equals the parent the chain names", obj["parent_agent_id"] == claimed)
     check(f"child {aid[:8]}… attested parent is in the chain", obj["parent_agent_id"] in certs)
     check(f"child {aid[:8]}… nonce is base64 of at least 128 bits (§19.2)",
@@ -237,6 +250,8 @@ for aid, sp in spawns.items():
     check("child scopes ⊆ parent scopes (§10.3)", set(child["allowed_scopes"]) <= set(parent["allowed_scopes"]))
     check("child count consistent with MaxChildren (§10.2)",
           sum(1 for s in spawns.values() if s["parent_agent_id"] == sp["parent_agent_id"]) <= parent["max_children"])
+    cross_org = child["org_id"] != parent["org_id"]
+    check("grant_id is present exactly when the spawn crossed organizations (§10.5)", ("grant_id" in sp) == cross_org)
     check("child ttl_seconds does not exceed the parent's (§10.3 SHOULD)", child["ttl_seconds"] <= parent["ttl_seconds"])
     node = next(n for n in agents if n["metadata"]["agent_id"] == aid)
     if "requested_scopes" in node:
@@ -309,18 +324,50 @@ if policy:
 else:
     check("document carries a policy envelope to verify", False, "none present")
 
-print("\n§19.7 — audit hash chain, recomputed independently")
+print("\n§11.4, §10.2 step 3 — the policies the Registry holds in force")
+in_force = {}
+for env in doc.get("policies", []):
+    b = env["body"]
+    check(f"policy in force for {b['subject'][:8]}… is a §3.1 envelope with a content hash",
+          sorted(env) == ["body", "content_hash", "owner_sig", "pa_sig"])
+    check(f"policy in force for {b['subject'][:8]}… owner_sig verifies under OpenSSL",
+          openssl_verify(jcs(b), env["owner_sig"], authorities["owner"]))
+    check(f"policy in force for {b['subject'][:8]}… pa_sig verifies under OpenSSL",
+          openssl_verify(jcs(b), env["pa_sig"], authorities["pa"]))
+    t = templates.get(b["subject"])
+    check(f"policy in force for {b['subject'][:8]}… governs an agent in the chain and stays within its template (§8.3)",
+          t is not None and set(b["scopes"]) <= set(t["allowed_scopes"])
+          and set(b.get("spawn_targets", [])) <= set(t["can_spawn"]))
+    in_force[b["subject"]] = b
+for aid, sp in spawns.items():
+    parent_policy = in_force.get(sp["parent_agent_id"])
+    check(f"child {aid[:8]}… is a SpawnTargets entry of the policy in force for its parent (§10.2 step 3)",
+          parent_policy is not None and aid in parent_policy.get("spawn_targets", []))
+
+print("\n§10.4, §19.7 — audit entries and the hash chain, recomputed independently")
 chain = doc.get("audit", {}).get("chain", [])
 ok_chain, broken_at = True, None
-prev = "genesis"
-for i, block in enumerate(chain):
-    pre = jcs({"index": block["index"], "timestamp": block["timestamp"],
-               "previous_hash": block["previous_hash"], "event": block["event"]})
-    if block["previous_hash"] != prev or hashlib.sha256(pre.encode()).hexdigest() != block["hash"]:
+prev = GENESIS_PREVIOUS_HASH
+for i, entry in enumerate(chain):
+    # §19.7 — every member but entry_hash, previous_hash included, in JCS.
+    pre = jcs({k: v for k, v in entry.items() if k != "entry_hash"})
+    if entry["previous_hash"] != prev or hashlib.sha256(pre.encode()).hexdigest() != entry["entry_hash"]:
         ok_chain, broken_at = False, i
         break
-    prev = block["hash"]
-check(f"audit chain verifies ({len(chain)} block(s))", ok_chain, f"broken at block {broken_at}")
+    prev = entry["entry_hash"]
+check(f"audit chain verifies ({len(chain)} entr{'y' if len(chain) == 1 else 'ies'})", ok_chain, f"broken at entry {broken_at}")
+spawn_entries = [e for e in chain if "spawning_agent_id" in e]
+check("the audit log records the spawn as a §10.4 entry", len(spawn_entries) >= 1)
+for e in spawn_entries:
+    check("spawn entry carries exactly the members of Table 6 (§10.4)",
+          set(AUDIT_SPAWN_FIELDS) <= set(e) <= set(AUDIT_SPAWN_FIELDS) | set(AUDIT_SPAWN_OPTIONAL_FIELDS))
+    check("spawn entry outcome is ALLOWED or DENIED, granted scopes empty and a reason present exactly when DENIED",
+          e["outcome"] in ("ALLOWED", "DENIED")
+          and ((e["outcome"] == "DENIED") == (len(e["granted_scopes"]) == 0))
+          and ((e["outcome"] == "DENIED") == ("reason" in e)))
+    if e["outcome"] == "ALLOWED" and e["child_template_id"] in spawns:
+        check("the ALLOWED entry's nonce is the one the child's certificate carries (§10.5)",
+              e["spawn_nonce"] == spawns[e["child_template_id"]]["spawn_nonce"])
 
 print("\n§8.2 — OpenSSL refuses the certificates, as the draft requires")
 for aid, node in ((n["metadata"]["agent_id"], n) for n in agents):

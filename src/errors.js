@@ -49,14 +49,17 @@ const SPECS = [
   ['ERR_WEAK_SIGNATURE',       '7.1',  2, 'certificate is signed with a digest weaker than SHA-256'],
   ['ERR_KEY_USAGE',            '7.1',  2, 'keyUsage is absent, not critical, or asserts more than digitalSignature'],
   ['ERR_SERIAL_ENTROPY',       '7.1',  2, 'serial number carries fewer than 64 bits'],
+  ['ERR_SERIAL_ENCODING',      '7.1',  2, 'serial number is not a positive, minimal DER INTEGER of at most 20 octets'],
   ['ERR_NO_REVOCATION_SOURCE', '14.4', 2, 'certificate does not say where its revocation state lives'],
   ['ERR_TEMPLATE_EXT_MISSING', '8.2',  2, 'agent certificate carries no Agent Template extension'],
   ['ERR_TEMPLATE_EXT_INVALID', '8.2',  2, 'Agent Template extension is malformed'],
+  ['ERR_EXTENSION_TOO_LARGE',  '8.2',  2, 'a profile extension exceeds the size a relying party will parse'],
+  ['ERR_MAX_CHILDREN_EXCEEDS_CAN_SPAWN', '8.1', 2, 'MaxChildren exceeds the number of children CanSpawn names'],
   ['ERR_TTL_TOO_LONG',         '9.3',  2, 'ttl_seconds exceeds the seven-day maximum'],
   ['ERR_VALIDITY_EXCEEDS_TTL', '9.3',  2, 'certificate validity is longer than its own ttl_seconds'],
   ['ERR_SPAWN_EXT_INVALID',    '10.5', 2, 'Agent Spawn extension is malformed'],
   ['ERR_PARENT_MISMATCH',      '10.5', 2, 'the parent the certificate attests is not the parent the chain names'],
-  ['ERR_NONCE_REUSED',         '19.2', 2, 'a spawn nonce was issued more than once'],
+  ['ERR_NONCE_REUSED',         '19.2', 2, 'a spawn nonce was presented more than once'],
   ['ERR_DUPLICATE_SUBJECT',    '12.1', 2, 'one subject presents two unrevoked certificates'],
   // Catalogued at stage 3, not 2: `assertNotRevoked` runs at the same point in
   // the walk as ERR_AGENT_REVOKED, right after the stage-2 X.509 identity
@@ -94,7 +97,9 @@ const SPECS = [
   //    MaxChildren consistency check (§10.2), and cross-organizational grants (§13)
   ['ERR_SPAWN_NOT_PERMITTED',  '10.1', 7, 'parent does not hold the spawn operation'],
   ['ERR_CHILD_NOT_WHITELISTED','10.1', 7, 'child is not in the parent CanSpawn list'],
+  ['ERR_SPAWN_NOT_IN_POLICY',  '10.2', 7, 'child is not a spawn target of the policy in force for the parent'],
   ['ERR_MAX_CHILDREN',         '10.2', 7, 'the document names more children than MaxChildren'],
+  ['ERR_GRANT_ID_MISMATCH',    '10.5', 7, 'the certificate names a grant for a same-organization spawn, or none for a cross-organization one'],
   ['ERR_GRANT_MISSING',        '13.1', 7, 'cross-organizational spawn has no explicit grant'],
   ['ERR_GRANT_INVALID',        '13.2', 7, 'grant is malformed, mis-addressed or not validly signed'],
   ['ERR_GRANT_EXPIRED',        '13.2', 7, 'grant has expired, or is dated in the future'],
@@ -105,7 +110,8 @@ const SPECS = [
   ['ERR_SCOPE_ESCALATION',     '10.3', 8, 'child scopes are not a subset of the parent scopes'],
   ['ERR_EMPTY_SCOPES',         '10.3', 8, 'a request for no scopes is refused'],
 
-  // ── Stage 9 — audit integrity (§19.7)
+  // ── Stage 9 — the audit entry (§10.4) and audit integrity (§19.7)
+  ['ERR_AUDIT_ENTRY_INVALID',  '10.4', 9, 'an audit log entry does not carry the members of Table 6'],
   ['ERR_AUDIT_CHAIN_BROKEN',   '19.7', 9, 'audit hash chain is broken'],
 
   // ── Stage 0 — issuance. The Registry refused to attest or mint (§9, §19.2).

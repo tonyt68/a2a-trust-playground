@@ -8,9 +8,12 @@
  * ── What the seed carries ───────────────────────────────────────────────────
  *
  * A Registry (CA, Owner, Policy Authority), a root orchestrator, one child
- * spawned from it, a dual-signed policy narrowing the child within its own
- * ceiling, an empty CRL, and a three-entry audit chain. Every stage does real
- * work on first load, and the sabotage buttons have something to break.
+ * spawned from it, the two policies the Registry holds in force (the parent's
+ * grants the child as a spawn target — §10.2 step 3 — and the child's grants
+ * nothing), a dual-signed policy UPDATE narrowing the child within its own
+ * ceiling, an empty CRL, and the Registry's own audit chain: the parent's
+ * issuance, each policy, and the §10.4 entry for the spawn. Every stage does
+ * real work on first load, and the sabotage buttons have something to break.
  *
  * The two agents are in ONE organization, so the default chain needs no
  * cross-organizational grant; the grant path is exercised by the buttons that
@@ -25,9 +28,9 @@
  * material at all.
  */
 
-import { mintChain, newAgentId, OWNER_COMMON_NAME } from './mint.js';
+import { mintChain, newAgentId, newNonce, OWNER_COMMON_NAME } from './mint.js';
 import { signEnvelope } from './crypto-sign.js';
-import { AuditChain } from './audit-chain.js';
+import { AuditChain, spawnEntry } from './audit-chain.js';
 
 /** Scopes used by the default chain. Deliberately two, so a subset is meaningful. */
 export const PARENT_SCOPES = Object.freeze(['read:events', 'write:events']);
@@ -39,10 +42,11 @@ export const CHILD_TTL_SECONDS = 43200;
 
 /**
  * An Agent Template (§8.2 Table 5) for one agent. `owner` is the Owner
- * certificate's subject, because §9.2 binds the two.
+ * certificate's subject, because §9.2 binds the two. `maxChildren` defaults
+ * to the number of children named, which is the most §8.1 permits.
  */
 export function templateFor({
-  subject, scopes, canSpawn = [], maxChildren = 0, ttlSeconds = CHILD_TTL_SECONDS,
+  subject, scopes, canSpawn = [], maxChildren = canSpawn.length, ttlSeconds = CHILD_TTL_SECONDS,
   orgId = ORG_ID, permittedOperations = ['read'], owner = OWNER_COMMON_NAME,
 }) {
   return {
@@ -59,24 +63,35 @@ export function templateFor({
 }
 
 /**
- * A real, hash-linked audit chain for the seeded document. Exported because
- * the `Reset the audit chain` button rebuilds it too, and two copies of this
- * would drift.
+ * Rebuild the audit chain a Registry would hold for this chain document: the
+ * parent's issuance, its policy, the §10.4 entry for the child's spawn
+ * (Table 6, built by the same `spawnEntry` the Registry uses), and the child's
+ * policy. Exported for the `Reset the audit chain` button, which repairs a
+ * tampered chain by rebuilding it from the certificates rather than from
+ * whatever the editor holds. Deterministic given its inputs.
  */
-export async function seedAuditChain({ parentId, childId, now = new Date() }) {
+export async function seedAuditChain({
+  parentId, childId = null, childScopes = [...CHILD_SCOPES], spawnNonce = null, grantId = null, now = new Date(),
+}) {
   const audit = new AuditChain();
   await audit.append({
-    action: 'issue_template', decision: 'ALLOWED',
-    agent: parentId, detail: 'parent template attested and issued by the Registry',
+    action: 'issue_template', outcome: 'ALLOWED',
+    agent: parentId, detail: 'template attested and issued by the Registry',
   }, new Date(now.getTime() - 120_000));
   await audit.append({
-    action: 'spawn_child', decision: 'ALLOWED',
-    agent: childId, parent: parentId, detail: 'two-check spawn rule satisfied; nonce fresh',
-  }, new Date(now.getTime() - 60_000));
-  await audit.append({
-    action: 'policy_update', decision: 'ALLOWED',
-    agent: childId, detail: 'dual-signed policy accepted, version 2',
-  }, new Date(now.getTime() - 30_000));
+    action: 'policy_update', outcome: 'ALLOWED',
+    agent: parentId, detail: 'dual-signed policy in force, version 1',
+  }, new Date(now.getTime() - 90_000));
+  if (childId) {
+    await audit.append(spawnEntry({
+      spawningAgentId: parentId, childTemplateId: childId, requestedScopes: childScopes,
+      spawnNonce: spawnNonce ?? newNonce(), grantId, outcome: 'ALLOWED',
+    }), new Date(now.getTime() - 60_000));
+    await audit.append({
+      action: 'policy_update', outcome: 'ALLOWED',
+      agent: childId, detail: 'dual-signed policy in force, version 1',
+    }, new Date(now.getTime() - 30_000));
+  }
   return audit;
 }
 
@@ -92,7 +107,7 @@ export async function buildDefaultDocument({ now = new Date(), onProgress } = {}
   const childId = newAgentId();
 
   const parent = templateFor({
-    subject: parentId, scopes: PARENT_SCOPES, canSpawn: [childId], maxChildren: 2,
+    subject: parentId, scopes: PARENT_SCOPES, canSpawn: [childId], maxChildren: 1,
     ttlSeconds: PARENT_TTL_SECONDS, permittedOperations: ['spawn', 'read', 'write'],
   });
   const child = templateFor({
@@ -103,10 +118,11 @@ export async function buildDefaultDocument({ now = new Date(), onProgress } = {}
   const minted = await mintChain({ parent, child, now, onProgress });
   const [parentCert, childCert] = minted.agents;
 
-  // The policy narrows the child to a subset of its own ceiling. Valid, and
-  // one character away from being refused — editing `read:events` to
-  // `admin:all` trips §8.3 rather than §10.3, which is the distinction the two
-  // lanes exist to make.
+  // The policy UPDATE narrows the child to a subset of its own ceiling. Valid,
+  // and one character away from being refused — editing `read:events` to
+  // `admin:all` trips §8.3 rather than §10.3, which is the distinction the
+  // two lanes exist to make. Version 2 supersedes the version 1 the Registry
+  // holds in force for the child (`policies`, `current_policy_version`).
   const policyBody = {
     subject: childId,
     owner: child.owner,
@@ -117,8 +133,6 @@ export async function buildDefaultDocument({ now = new Date(), onProgress } = {}
   };
   const policy = await signEnvelope(policyBody,
     minted.authorities.owner.privateKey, minted.authorities.pa.privateKey, { withHash: true });
-
-  const audit = await seedAuditChain({ parentId, childId, now });
 
   return {
     // ── The chain. Every bound lives in the certificates; the metadata only
@@ -160,13 +174,21 @@ export async function buildDefaultDocument({ now = new Date(), onProgress } = {}
       },
     },
 
-    // ── The §3.1 envelope, so stages 4-6 do real work on first load ─────────
+    // ── The policies the Registry holds IN FORCE, one per subject (§11.4).
+    //    The parent's names the child in spawn_targets, which is what §10.2
+    //    step 3 was evaluated against when the child was spawned.
+    policies: minted.policies,
+
+    // ── The §3.1 envelope of a policy UPDATE, so stages 4-6 do real work on
+    //    first load ──────────────────────────────────────────────────────────
     policy,
     // The version the Registry currently holds in force for this subject
     // (§11.4): context the page carries so replay can be demonstrated.
     current_policy_version: 1,
 
     crl: { revoked: [], disabled: [] },
-    audit: audit.toJSON(),
+    // The Registry's own record: issuance, the policies, and the §10.4 entry
+    // for the spawn — what actually happened, in the order it happened.
+    audit: minted.registry.audit.toJSON(),
   };
 }

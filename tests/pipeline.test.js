@@ -10,8 +10,8 @@ import { buildDefaultDocument } from '../src/defaults.js';
 import { newAgentId } from '../src/mint.js';
 import { contentHash, signEnvelope, privateKeyFromPem } from '../src/crypto-sign.js';
 import {
-  childOf, parentOf, templateOf, reissueThroughRegistry, issueRaw, resignPolicy, spawnAcrossOrganizations,
-  issueSecondChildWithNonce,
+  childOf, parentOf, templateOf, spawnOf, reissueThroughRegistry, issueRaw, resignPolicy, spawnAcrossOrganizations,
+  issueSecondChildWithNonce, setInForcePolicy, dropInForcePolicy,
 } from '../src/scenarios.js';
 import { Registry } from '../src/mint.js';
 
@@ -50,7 +50,70 @@ describe('the default chain passes every stage', () => {
   it('appends exactly one audit entry for the run', async () => {
     const r = await run(clone());
     expect(r.audit.entries).toBe(base.audit.chain.length + 1);
-    expect(r.audit.chain.at(-1).event).toMatchObject({ action: 'verify_chain', decision: 'ALLOWED' });
+    expect(r.audit.chain.at(-1)).toMatchObject({ action: 'verify_chain', outcome: 'ALLOWED' });
+  });
+});
+
+describe('§10.2 step 3 — the policy in force, and §10.5 grant_id', () => {
+  it('a policy in force that omits the child → ERR_SPAWN_NOT_IN_POLICY §10.2 at DELEGATION', async () => {
+    const d = clone(); await setInForcePolicy(d, parentOf(d).metadata.agent_id, { spawn_targets: [] });
+    await expectRefusal(d, 'ERR_SPAWN_NOT_IN_POLICY', '10.2', { walk: 'DELEGATION' });
+  });
+  it('no policy in force for the parent → ERR_SPAWN_NOT_IN_POLICY — absent grants nothing (§11.4, §15.1)', async () => {
+    const d = clone(); dropInForcePolicy(d, parentOf(d).metadata.agent_id);
+    const r = await expectRefusal(d, 'ERR_SPAWN_NOT_IN_POLICY', '10.2');
+    expect(r.stages.find((s) => s.result === 'DENY').detail).toMatch(/no policy is in force/);
+  });
+  it('a policy in force is verified like any envelope: a tampered one is refused before it is consulted', async () => {
+    const d = clone(); d.policies[0].body.spawn_targets = [...d.policies[0].body.spawn_targets, newAgentId()];
+    await expectRefusal(d, 'ERR_OWNER_SIG_INVALID', '11.3', { walk: 'DELEGATION' });
+  });
+  it('a policy in force beyond its template’s ceiling → ERR_POLICY_EXCEEDS_TEMPLATE §8.3', async () => {
+    const d = clone(); await setInForcePolicy(d, childOf(d).metadata.agent_id, { scopes: ['admin:all'] });
+    await expectRefusal(d, 'ERR_POLICY_EXCEEDS_TEMPLATE', '8.3');
+  });
+  it('a same-organization child whose certificate names a grant → ERR_GRANT_ID_MISMATCH §10.5', async () => {
+    const d = clone(); const c = childOf(d);
+    await issueRaw(d, c, { spawn: { ...spawnOf(c), grant_id: newAgentId() } });
+    await expectRefusal(d, 'ERR_GRANT_ID_MISMATCH', '10.5', { walk: 'DELEGATION' });
+  });
+  it('a cross-organization child whose certificate names no grant → ERR_GRANT_ID_MISMATCH §10.5', async () => {
+    const d = clone(); await spawnAcrossOrganizations(d, {}, { now });
+    const c = childOf(d); const { grant_id: _dropped, ...spawn } = spawnOf(c);
+    await issueRaw(d, c, { spawn });
+    await expectRefusal(d, 'ERR_GRANT_ID_MISMATCH', '10.5', { walk: 'CROSS-ORG GRANT' });
+  });
+  it('a cross-organization child issued under a DIFFERENT grant than the one presented → ERR_GRANT_INVALID', async () => {
+    const d = clone(); await spawnAcrossOrganizations(d, {}, { now });
+    d.grant = await signEnvelope({ ...d.grant.body, grant_id: newAgentId() },
+      await privateKeyFromPem(d.authorities.owner.key_pem), await privateKeyFromPem(d.authorities.pa.key_pem));
+    const r = await expectRefusal(d, 'ERR_GRANT_INVALID', '13.2', { walk: 'CROSS-ORG GRANT' });
+    expect(r.stages.find((s) => s.result === 'DENY').detail).toMatch(/not this one/);
+  });
+  it('revoking the grant revokes the certificates issued under it (§13.4)', async () => {
+    const d = clone(); await spawnAcrossOrganizations(d, {}, { now });
+    const revoked = d.grant.body.grant_id;
+    for (const n of d.chain) if (n.role === 'agent' && spawnOf(n)?.grant_id === revoked) d.crl.revoked.push(n.metadata.agent_id);
+    await expectRefusal(d, 'ERR_AGENT_REVOKED', '14', { walk: 'CHILD AGENT' });
+  });
+  it('an audit entry outside Table 6 → ERR_AUDIT_ENTRY_INVALID §10.4 at AUDIT CHAIN', async () => {
+    const d = clone();
+    const spawn = d.audit.chain.find((e) => 'spawning_agent_id' in e);
+    spawn.outcome = 'MAYBE';
+    await expectRefusal(d, 'ERR_AUDIT_ENTRY_INVALID', '10.4', { walk: 'AUDIT CHAIN' });
+  });
+  it('a certificate whose MaxChildren exceeds CanSpawn → ERR_MAX_CHILDREN_EXCEEDS_CAN_SPAWN §8.1 at the parent', async () => {
+    const d = clone(); await issueRaw(d, parentOf(d), { template: { max_children: 5 } });
+    await expectRefusal(d, 'ERR_MAX_CHILDREN_EXCEEDS_CAN_SPAWN', '8.1', { walk: 'PARENT AGENT' });
+  });
+  it('a non-minimal serial → ERR_SERIAL_ENCODING §7.1; an oversized template extension → ERR_EXTENSION_TOO_LARGE §8.2', async () => {
+    let d = clone();
+    const octets = new Uint8Array(20); crypto.getRandomValues(octets); octets[0] = 0x00; octets[1] &= 0x7f;
+    await issueRaw(d, childOf(d), { serialOctets: octets });
+    await expectRefusal(d, 'ERR_SERIAL_ENCODING', '7.1', { walk: 'CHILD AGENT' });
+    d = clone();
+    await issueRaw(d, childOf(d), { template: { policy_ref: `policy-store/${'x'.repeat(17000)}/current` } });
+    await expectRefusal(d, 'ERR_EXTENSION_TOO_LARGE', '8.2', { walk: 'CHILD AGENT' });
   });
 });
 
@@ -97,6 +160,7 @@ describe('every sabotage yields its documented code and clause', () => {
   it('escalate the scope in the certificate → ERR_SCOPE_ESCALATION §10.3 at DELEGATION', async () => {
     const d = clone(); const c = childOf(d);
     await issueRaw(d, c, { template: { allowed_scopes: ['admin:all'] } }); c.requested_scopes = ['admin:all']; delete d.policy;
+    dropInForcePolicy(d, c.metadata.agent_id);   // the child's policy in force would trip §8.3 first
     await expectRefusal(d, 'ERR_SCOPE_ESCALATION', '10.3', { walk: 'DELEGATION' });
   });
   it('request beyond the certificate → ERR_SCOPE_ESCALATION', async () => {
@@ -112,7 +176,9 @@ describe('every sabotage yields its documented code and clause', () => {
     await expectRefusal(d, 'ERR_MAX_CHILDREN', '10.2', { walk: 'DELEGATION' });
   });
   it('spawn a non-whitelisted child → ERR_CHILD_NOT_WHITELISTED §10.1', async () => {
-    const d = clone(); await issueRaw(d, parentOf(d), { template: { can_spawn: [] } });
+    const d = clone(); const p = parentOf(d);
+    await issueRaw(d, p, { template: { can_spawn: [], max_children: 0 } });
+    await setInForcePolicy(d, p.metadata.agent_id, { spawn_targets: [] });   // else §8.3 refuses the policy first
     await expectRefusal(d, 'ERR_CHILD_NOT_WHITELISTED', '10.1');
   });
   it('parent without spawn → ERR_SPAWN_NOT_PERMITTED §10.1', async () => {
@@ -121,8 +187,9 @@ describe('every sabotage yields its documented code and clause', () => {
   });
   it('forge the issuer → ERR_FORGED_ISSUER §7', async () => {
     const d = clone(); const rogue = await Registry.create({ caCommonName: 'Rogue-CA', now });
-    const c = childOf(d);
-    const issued = await rogue.spawn({ attested: await rogue.attest(templateOf(c)), parent: templateOf(parentOf(d)), now });
+    const c = childOf(d); const parent = templateOf(parentOf(d));
+    await rogue.adoptPolicyFor(parent, { spawnTargets: [c.metadata.agent_id], now });
+    const issued = await rogue.spawn({ attested: await rogue.attest(templateOf(c)), parent, now });
     c.cert_pem = issued.cert_pem; c.key_pem = issued.key_pem;
     await expectRefusal(d, 'ERR_FORGED_ISSUER', '7', { walk: 'CHILD AGENT' });
   });
@@ -169,7 +236,7 @@ describe('every sabotage yields its documented code and clause', () => {
     await expectRefusal(d, 'ERR_TEMPLATE_EXT_INVALID', '8.2');
   });
   it('alter an audit entry → ERR_AUDIT_CHAIN_BROKEN §19.7, naming the entry', async () => {
-    const d = clone(); d.audit.chain[1].event.detail = 'altered';
+    const d = clone(); d.audit.chain[1].detail = 'altered';
     const r = await expectRefusal(d, 'ERR_AUDIT_CHAIN_BROKEN', '19.7', { walk: 'AUDIT CHAIN' });
     expect(r.stages.find((s) => s.result === 'DENY').detail).toMatch(/entry 1/);
   });
@@ -215,6 +282,9 @@ describe('cross-organizational grants (§13)', () => {
   // wrong with it is whatever the test then does to it.
   async function withUnusedGrant() {
     const d = clone(); await spawnAcrossOrganizations(d, {}, { now });
+    const childId = childOf(d).metadata.agent_id;
+    // Back into the parent's organization: the policy in force follows the template (§11.2).
+    await setInForcePolicy(d, childId, { org_id: 'playground-org' });
     await reissueThroughRegistry(d, childOf(d), { org_id: 'playground-org' }, { now });
     d.policy.body.org_id = 'playground-org'; await resignPolicy(d);
     d.grant = await signEnvelope({ ...d.grant.body, grantor: 'playground-org', grantee: 'playground-org' },
@@ -237,9 +307,11 @@ describe('cross-organizational grants (§13)', () => {
     const parent = parentOf(d);
     const firstChildId = childOf(d).metadata.agent_id;
     const secondChildId = newAgentId();
-    // Widen the parent so it can spawn a second child too, then mint one.
+    // Widen the parent so it can spawn a second child too — the certificate
+    // (CanSpawn) and the policy in force (SpawnTargets) both — then mint one.
     await reissueThroughRegistry(d, parent,
       { can_spawn: [firstChildId, secondChildId], max_children: 2 }, { now });
+    await setInForcePolicy(d, parent.metadata.agent_id, { spawn_targets: [firstChildId, secondChildId] });
     const registry = await Registry.fromDocument(d, { now });
     const secondTemplate = { ...templateOf(childOf(d)), subject: secondChildId };
     const issued = await registry.spawn({
@@ -253,7 +325,7 @@ describe('cross-organizational grants (§13)', () => {
     // refuse a grant that is well-formed, validly signed, and correctly
     // addressed to the agent it actually names.
     d.grant = await signEnvelope({
-      grantor: 'playground-org', grantee: 'playground-org', template: secondChildId,
+      grant_id: newAgentId(), grantor: 'playground-org', grantee: 'playground-org', template: secondChildId,
       allowed_scopes: [...secondTemplate.allowed_scopes], issued_at: now.toISOString(),
       ttl_seconds: 3600, max_spawns: 1,
     }, await privateKeyFromPem(d.authorities.owner.key_pem), await privateKeyFromPem(d.authorities.pa.key_pem));
@@ -342,9 +414,15 @@ describe('the chain document asserts no authority of its own', () => {
     const d = clone(); await reissueThroughRegistry(d, childOf(d), {}, { now });
     expect((await run(d)).verdict).toBe('PASS');
   });
-  it('narrowing the parent stays valid; the child is still a subset', async () => {
-    const d = clone(); await reissueThroughRegistry(d, parentOf(d), { allowed_scopes: ['read:events'] }, { now });
+  it('narrowing the parent stays valid; the child is still a subset, and the policy in force is re-stated within the new ceiling', async () => {
+    const d = clone(); const p = parentOf(d);
+    await reissueThroughRegistry(d, p, { allowed_scopes: ['read:events'] }, { now });
+    await setInForcePolicy(d, p.metadata.agent_id, { scopes: ['read:events'] });
     expect((await run(d)).verdict).toBe('PASS');
+  });
+  it('narrowing the parent WITHOUT re-stating its policy is refused: a retired template’s policy is not inherited (§8.3, §12.3)', async () => {
+    const d = clone(); await reissueThroughRegistry(d, parentOf(d), { allowed_scopes: ['read:events'] }, { now });
+    await expectRefusal(d, 'ERR_POLICY_EXCEEDS_TEMPLATE', '8.3');
   });
 });
 
@@ -353,8 +431,8 @@ describe('the stage log stops at the first failure and still records the refusal
     const d = clone(); d.crl.revoked.push(childOf(d).metadata.agent_id);
     const r = await run(d);
     expect(Math.max(...r.stages.map((s) => s.n))).toBe(3);
-    expect(r.audit.chain.at(-1).event).toMatchObject({ decision: 'DENIED', reason: 'ERR_AGENT_REVOKED' });
-    expect(r.audit.chain.at(-1).event.agents).toHaveLength(2);
+    expect(r.audit.chain.at(-1)).toMatchObject({ outcome: 'DENIED', reason: 'ERR_AGENT_REVOKED' });
+    expect(r.audit.chain.at(-1).agents).toHaveLength(2);
   });
 });
 

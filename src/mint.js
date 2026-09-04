@@ -9,8 +9,13 @@
  *
  *   Registry           the gates: §9.1 conformance, §9.2 dual attestation, §9.3
  *                      issuance (re-gate, re-verify, copy members unaltered,
- *                      notAfter bound to ttl_seconds), §10.1 Check 1 and §19.2
- *                      freshness and nonce uniqueness at spawn time.
+ *                      notAfter bound to ttl_seconds), the six steps of §10.2
+ *                      at spawn time — Check 1 from the parent's certificate,
+ *                      the grant of §13.2, the policy in force (step 3), scope
+ *                      containment, the MaxChildren count it holds, one live
+ *                      certificate per template — and the §19.2 freshness
+ *                      window and nonce store. Every spawn request, accepted
+ *                      or refused, becomes a §10.4 audit entry.
  *
  *   issueCertificate   the CA's signing primitive. No gate. Anyone holding the
  *                      CA key can call it with whatever they like — which is
@@ -46,13 +51,24 @@ import {
   RelativeDistinguishedNames, CRLDistributionPoints, DistributionPoint,
 } from 'pkijs';
 import { preimage } from './crypto-sign.js';
-import { signBody, verifyBody, publicKeyFromCertificate } from './crypto-sign.js';
+import { signBody, verifyBody, publicKeyFromCertificate, signEnvelope } from './crypto-sign.js';
 import {
   TEMPLATE_EXT_OID, SPAWN_EXT_OID, assertTemplateMembers, parseCertificate, subjectCN, OID, KEY_USAGE,
+  MAX_SERIAL_OCTETS,
 } from './x509.js';
-import { validateTimestamp, validateNonce, validateScopeSet } from './validate-input.js';
+import {
+  validateTimestamp, validateNonce, validateScopeSet, FRESHNESS_WINDOW_MS,
+} from './validate-input.js';
+import { validateGrant } from './bounds.js';
+import {
+  assertEnvelope, assertFieldGuard, assertRequiredFields, assertWithinTemplateBounds,
+} from './policy.js';
+import { AuditChain, spawnEntry } from './audit-chain.js';
 import { DenyError } from './errors.js';
 import { bytesToBase64 } from './encoding.js';
+
+/** §19.2 — re-exported so the page and the tests read the window from the issuer. */
+export { FRESHNESS_WINDOW_MS };
 
 /**
  * The demo-notice OID, under the joint-iso-itu-t UUID arc (2.25). The arc is
@@ -81,8 +97,18 @@ export const PA_COMMON_NAME = 'policy-authority';
 export const CRL_URI = 'http://crl.a2a-playground.invalid/ca.crl';
 /** Authority certificates are not bound to a template TTL; one day, same as the seed's parent. */
 export const AUTHORITY_VALIDITY_SECONDS = 86400;
-/** §19.2 — sixty seconds, either direction. */
-export const FRESHNESS_WINDOW_MS = 60_000;
+/**
+ * §7.1 — random octets drawn for a serial. Nineteen, not twenty: RFC 5280 caps
+ * the INTEGER at twenty octets and a top bit that happens to be set needs one
+ * more for the sign, so the draw leaves room for it.
+ */
+export const SERIAL_RANDOM_OCTETS = MAX_SERIAL_OCTETS - 1;
+/**
+ * §8.2 — this store lays out PolicyRef as `policy-store/{subject}/current`
+ * (defaults.js), which is how the Registry resolves a ref to the subject it
+ * holds a policy for.
+ */
+const POLICY_REF = /^policy-store\/([0-9a-f-]{36})\/current$/;
 
 const KEY_PARAMS = Object.freeze({ name: 'ECDSA', namedCurve: 'P-256' });
 
@@ -184,18 +210,31 @@ function jcsExtension(oid, obj) {
   return new Extension({ extnID: oid, critical: true, extnValue: preimage(obj).buffer });
 }
 
-/** @param {number} [bytes] octets of CSPRNG output; §7.1 requires at least eight */
-function serialNumber(bytes = 20) {
-  const raw = crypto.getRandomValues(new Uint8Array(bytes));
-  // DER INTEGER encoding is minimal (X.690 §8.3.2): a leading 0x00 is legal
-  // ONLY when the next octet's high bit is set, to keep the value positive.
-  // Clearing the top bit outright would spend one bit of entropy and, on the
-  // 1-in-256 draw where it lands on 0x00 followed by another octet under
-  // 0x80, emit a non-minimal encoding that strict DER parsers refuse.
-  if (!(raw[0] & 0x80)) return new asn1js.Integer({ valueHex: raw.buffer });
-  const padded = new Uint8Array(bytes + 1);
-  padded.set(raw, 1);
-  return new asn1js.Integer({ valueHex: padded.buffer });
+/**
+ * §7.1 — a positive INTEGER in minimal DER, at most twenty octets, carrying
+ * every bit it was given. The procedure is the draft's: draw the random
+ * octets (at most nineteen, so a prepended octet stays within the limit),
+ * strip any leading zero octets, and prepend a single 0x00 only when the
+ * first remaining octet has its top bit set. Clearing the top bit instead
+ * would spend a bit of entropy and, one draw in 256, emit a leading zero
+ * followed by an octet under 0x80 — a non-minimal encoding strict parsers
+ * refuse.
+ *
+ * @param {number} [bytes]        octets of CSPRNG output, 1–19; §7.1 requires at least eight
+ * @param {Uint8Array} [octets]   use these content octets verbatim — the raw issuer's override
+ */
+function serialNumber(bytes = SERIAL_RANDOM_OCTETS, octets = null) {
+  if (octets) {
+    return new asn1js.Integer({ valueHex: Uint8Array.from(octets).buffer });
+  }
+  const raw = crypto.getRandomValues(new Uint8Array(Math.max(1, Math.min(bytes, SERIAL_RANDOM_OCTETS))));
+  let start = 0;
+  while (start < raw.length - 1 && raw[start] === 0x00) start++;
+  const significant = raw.subarray(start);
+  const content = significant[0] & 0x80
+    ? Uint8Array.from([0x00, ...significant])
+    : Uint8Array.from(significant);
+  return new asn1js.Integer({ valueHex: content.buffer });
 }
 
 export async function toPem(cert, label = 'CERTIFICATE') {
@@ -227,18 +266,19 @@ export async function privateKeyToPem(privateKey) {
  * @param {object}   [opts.template]   Agent Template extension members (§8.2)
  * @param {object}   [opts.spawn]      Agent Spawn extension members (§10.5)
  * @param {number[]} [opts.keyUsageBits]  override the profile's keyUsage
- * @param {number}   [opts.serialBytes]   override the serial length
+ * @param {number}   [opts.serialBytes]   override the number of random serial octets
+ * @param {Uint8Array} [opts.serialOctets] use these serial content octets verbatim
  * @param {boolean}  [opts.revocationSource]  false omits cRLDistributionPoints
  * @param {boolean}  [opts.criticalExtensions] false marks the profile extensions non-critical
  */
 export async function issueCertificate({
   commonName, subjectPublicKey, issuer = null, isCa = false, notBefore, notAfter,
-  template = null, spawn = null, keyUsageBits = null, serialBytes = 20,
-  revocationSource = true, criticalExtensions = true, selfSignKey = null,
+  template = null, spawn = null, keyUsageBits = null, serialBytes = SERIAL_RANDOM_OCTETS,
+  serialOctets = null, revocationSource = true, criticalExtensions = true, selfSignKey = null,
 }) {
   const cert = new Certificate();
   cert.version = 2;                       // v3
-  cert.serialNumber = serialNumber(serialBytes);
+  cert.serialNumber = serialNumber(serialBytes, serialOctets);
 
   setName(cert.subject, commonName);
   setName(cert.issuer, issuer ? issuer.commonName : commonName);
@@ -293,10 +333,10 @@ export async function issueCertificate({
  * §10.1 Check 1 — read from the PARENT's Agent Template extension: it holds
  * `spawn`, and the child is in its CanSpawn list. Shared with bounds.js's
  * `assertSpawnPermitted` (which adds the §10.2 sibling-count consistency
- * check this Registry does not need — a real, stateful CA enforces
- * MaxChildren by holding the count, not by re-deriving it here), so the
- * Registry's own gate at issuance and the relying party's check on the
- * resulting certificate cannot silently disagree about what the rule means.
+ * check a relying party performs on a document; this Registry enforces
+ * MaxChildren from the count it holds instead), so the Registry's own gate at
+ * issuance and the relying party's check on the resulting certificate cannot
+ * silently disagree about what the rule means.
  */
 export function assertCanSpawn(parentTemplate, childId) {
   if (!parentTemplate.permitted_operations.includes('spawn')) {
@@ -317,10 +357,11 @@ export function newNonce() {
 /**
  * The Template Registry and its CA, as one logical entity (§4).
  *
- * Holds the CA key, the Owner and Policy Authority keys, and the set of spawn
- * nonces it has issued. The two authorities are minted here because the
- * playground plays every role; in a deployment the Owner's key belongs to the
- * template owner and is never in the Registry's hands.
+ * Holds the CA key, the Owner and Policy Authority keys, the policy store, the
+ * counts §10.2 step 5 compares against, the nonces it has seen, and the audit
+ * log of §10.4. The two authorities are minted here because the playground
+ * plays every role; in a deployment the Owner's key belongs to the template
+ * owner and is never in the Registry's hands.
  */
 export class Registry {
   constructor({ commonName, ca, authorities, now }) {
@@ -328,8 +369,18 @@ export class Registry {
     this.ca = ca;                       // { cert, cert_pem, key_pem, privateKey }
     this.authorities = authorities;     // { owner, pa } each { common_name, cert, cert_pem, key_pem, privateKey }
     this.now = now;
-    /** §19.2 — nonces this Registry has accepted. Retained for the life of the tab, which exceeds twice the window. */
+    /** §19.2 — every nonce PRESENTED to this Registry, accepted or refused. Retained for the life of the tab, which exceeds twice the window. */
     this.seenNonces = new Set();
+    /** §11 — the policy store: subject → the policy body in force for it. */
+    this.policies = new Map();
+    /** §10.2 step 5 — subject → notAfter of the certificate this Registry issued for it. One identity, one certificate (§12.1). */
+    this.live = new Map();
+    /** §10.2 step 5 — parent subject → the children it has spawned. This is the count MaxChildren is compared against. */
+    this.children = new Map();
+    /** §13.2 — grant_id → spawns issued under it. This is the count MaxSpawns is compared against. */
+    this.grantSpawns = new Map();
+    /** §10.4 — every spawn request, accepted or refused, plus this Registry's other decisions. */
+    this.audit = new AuditChain();
   }
 
   /**
@@ -369,9 +420,11 @@ export class Registry {
 
   /**
    * Rebuild a Registry from a document that carries its keys, so the page can
-   * re-issue under the anchor the document already trusts. The nonce store
-   * starts empty: a rebuilt Registry has forgotten what it issued, which is the
-   * failure §19.2's retention rule exists to name.
+   * re-issue under the anchor the document already trusts. The policy store is
+   * rebuilt from the envelopes the document says are in force, each verified
+   * under the authorities before it is kept. The nonce store, the live set and
+   * the counts start empty: a rebuilt Registry has forgotten what it issued,
+   * which is the failure §19.2's retention rule exists to name.
    */
   static async fromDocument(doc, { now = new Date() } = {}) {
     const { privateKeyFromPem } = await import('./crypto-sign.js');
@@ -396,7 +449,13 @@ export class Registry {
         privateKey: await privateKeyFromPem(a.key_pem),
       };
     }
-    return new Registry({ commonName: ca.common_name, ca, authorities, now });
+    const registry = new Registry({ commonName: ca.common_name, ca, authorities, now });
+    const policies = doc.policies ?? [];
+    if (!Array.isArray(policies)) {
+      throw new DenyError('ERR_SCHEMA_VIOLATION', 'policies must be an array of §3.1 envelopes');
+    }
+    for (const envelope of policies) await registry.adoptEnvelope(envelope);
+    return registry;
   }
 
   get issuer() {
@@ -443,10 +502,16 @@ export class Registry {
    * @param {CryptoKeyPair} [opts.subjectKeys]  omitted = a fresh P-256 pair
    * @param {object} [opts.spawn]   Agent Spawn members for a child (§10.5)
    * @param {Date}   [opts.now]
+   * @param {boolean} [opts.record] false when `spawn()` is recording the event itself
    */
-  async issue(attested, { subjectKeys = null, spawn = null, now = this.now } = {}) {
+  async issue(attested, { subjectKeys = null, spawn = null, now = this.now, record = true } = {}) {
     if (!attested || typeof attested !== 'object') {
       throw new DenyError('ERR_TEMPLATE_SIGNATURE', 'nothing to issue: no attested template');
+    }
+    // §11.6 — a content hash is a member of a POLICY envelope only.
+    if ('content_hash' in attested) {
+      throw new DenyError('ERR_ENVELOPE_MEMBER',
+        'a template envelope carries no content_hash — §11.6 gives that member to a policy, not a template');
     }
     // The gate again. A template that was conforming when signed can be edited
     // afterwards; trusting the signature without re-checking would issue a
@@ -470,11 +535,18 @@ export class Registry {
     }
 
     const keys = subjectKeys ?? await generateKeyPair();
+    const notAfter = new Date(now.getTime() + body.ttl_seconds * 1000);
     const cert = await issueCertificate({
       commonName: body.subject, subjectPublicKey: keys.publicKey, issuer: this.issuer,
-      notBefore: now, notAfter: new Date(now.getTime() + body.ttl_seconds * 1000),
-      template: body, spawn,
+      notBefore: now, notAfter, template: body, spawn,
     });
+    this.live.set(body.subject, notAfter);
+    if (record) {
+      await this.audit.append({
+        action: 'issue_template', outcome: 'ALLOWED', agent: body.subject,
+        detail: 'template attested and issued by the Registry',
+      }, now);
+    }
     return {
       agent_id: body.subject,
       cert, cert_pem: await toPem(cert),
@@ -484,13 +556,94 @@ export class Registry {
   }
 
   /**
-   * §10.2 — a spawn request, evaluated by the Registry. Check 1 against the
-   * parent's Agent Template extension (§10.1), the scope check (§10.3), and
-   * the freshness window and nonce uniqueness of §19.2. Then issuance with the
-   * Agent Spawn extension (§10.5).
+   * §10.2 step 3 — the policy in force for an agent, retrieved through the
+   * PolicyRef of its certificate and never from anything the agent supplies.
+   * A ref this store cannot resolve names no policy, and no policy grants no
+   * spawn targets (§11.4).
+   */
+  policyInForce(policyRef) {
+    const m = POLICY_REF.exec(String(policyRef ?? ''));
+    return m ? (this.policies.get(m[1]) ?? null) : null;
+  }
+
+  /**
+   * §11.7 steps 1–4, with the page playing every role: the body passes the
+   * field guard and the automated gate against the template it governs
+   * (§8.3), the Owner signs and the Policy Authority countersigns, and the
+   * store keeps it in force for its subject. A version that does not
+   * supersede the one in force is refused (§11.4).
    *
-   * MaxChildren (step 4) is the Registry's count, not the document's; this
-   * Registry keeps none because the page never holds more than one chain.
+   * @returns {Promise<object>} the §3.1 envelope, content_hash included
+   */
+  async adoptPolicy(body, { template = null, now = this.now } = {}) {
+    assertFieldGuard(body);
+    assertRequiredFields(body);
+    if (template) assertWithinTemplateBounds(body, template);
+    const current = this.policies.get(body.subject);
+    if (current && body.version <= current.version) {
+      throw new DenyError('ERR_POLICY_VERSION',
+        `policy version ${body.version} does not supersede the version in force, ${current.version}`);
+    }
+    const envelope = await signEnvelope({ ...body },
+      this.authorities.owner.privateKey, this.authorities.pa.privateKey, { withHash: true });
+    this.policies.set(body.subject, envelope.body);
+    await this.audit.append({
+      action: 'policy_update', outcome: 'ALLOWED', agent: body.subject,
+      detail: `dual-signed policy in force, version ${body.version}`,
+    }, now);
+    return envelope;
+  }
+
+  /**
+   * The policy a freshly issued template starts under: its own ceiling as the
+   * scopes, and the spawn targets the caller grants — by default everything
+   * CanSpawn names, which is what a deployment does the day it registers a
+   * template and before any policy narrows it.
+   */
+  async adoptPolicyFor(template, { spawnTargets = template.can_spawn, scopes = template.allowed_scopes,
+                                   version = 1, now = this.now } = {}) {
+    return this.adoptPolicy({
+      subject: template.subject, owner: template.owner, org_id: template.org_id,
+      scopes: [...scopes], spawn_targets: [...spawnTargets], version, issued_at: now.toISOString(),
+    }, { template, now });
+  }
+
+  /**
+   * Rebuild one in-force policy from its envelope, as `fromDocument` does:
+   * both signatures verified under this Registry's authorities before the
+   * body is kept. A store that adopts what it is handed is a store an editor
+   * can fill.
+   */
+  async adoptEnvelope(envelope) {
+    assertEnvelope(envelope, { requireHash: true });
+    assertFieldGuard(envelope.body);
+    assertRequiredFields(envelope.body);
+    const ownerKey = await publicKeyFromCertificate(this.authorities.owner.cert_pem);
+    const paKey = await publicKeyFromCertificate(this.authorities.pa.cert_pem);
+    if (!(await verifyBody(envelope.body, envelope.owner_sig, ownerKey))) {
+      throw new DenyError('ERR_OWNER_SIG_INVALID', 'a policy in force: owner signature does not verify over the body');
+    }
+    if (!(await verifyBody(envelope.body, envelope.pa_sig, paKey))) {
+      throw new DenyError('ERR_PA_SIG_INVALID', 'a policy in force: Policy Authority signature does not verify over the body');
+    }
+    this.policies.set(envelope.body.subject, envelope.body);
+  }
+
+  /**
+   * §10.2 — a spawn request, evaluated by the Registry in the draft's order:
+   *
+   *   §19.2  freshness and the nonce, which is spent by being PRESENTED
+   *   1      Check 1 from the parent's Agent Template extension (§10.1)
+   *   2      ownership: the child's organization is the parent's, or a grant
+   *          under §13.2 names the parent's organization as Grantee
+   *   3      the child is a SpawnTargets entry of the policy in force for the
+   *          parent, retrieved through the parent's policy_ref (§11.4)
+   *   4      scope containment (§10.3)
+   *   5      the count this Registry holds is below MaxChildren, and the child
+   *          template has no live certificate already (§12.1)
+   *   6      issuance with the Agent Spawn extension (§10.5)
+   *
+   * Every request becomes a §10.4 audit entry, accepted or refused.
    *
    * @param {object} opts
    * @param {{body: object, owner_sig: string, pa_sig: string}} opts.attested  the child template
@@ -499,8 +652,9 @@ export class Registry {
    * @param {string} [opts.nonce]       the request nonce (base64, ≥128 bits)
    * @param {Date}   [opts.now]         the Registry's clock
    * @param {CryptoKeyPair} [opts.subjectKeys]
+   * @param {object} [opts.grant]       the §3.1 grant envelope, for a cross-organizational spawn
    */
-  async spawn({ attested, parent, requestedAt = null, nonce = null, now = this.now, subjectKeys = null }) {
+  async spawn({ attested, parent, requestedAt = null, nonce = null, now = this.now, subjectKeys = null, grant = null }) {
     const body = Registry.conformanceGate(attested?.body);
     const parentTemplate = Registry.conformanceGate(parent);
     const at = requestedAt ?? now.toISOString();
@@ -508,51 +662,118 @@ export class Registry {
     validateTimestamp(at, 'spawned_at');
     validateNonce(n, 'spawn_nonce');
 
-    // §19.2 — more than sixty seconds from this clock, either direction, is
-    // refused. The measured offset goes in the detail so the boundary is
-    // visible rather than "roughly a minute".
-    const offsetMs = new Date(at).getTime() - now.getTime();
-    if (Math.abs(offsetMs) > FRESHNESS_WINDOW_MS) {
-      const s = (Math.abs(offsetMs) / 1000).toFixed(1);
-      throw new DenyError('ERR_SPAWN_STALE',
-        `request timestamp is ${s} s in the ${offsetMs < 0 ? 'past' : 'future'}; the window is 60 s`);
-    }
+    // §19.2 — a nonce is spent by being presented, not by being accepted. It
+    // is recorded here, before any step below is evaluated, so a request
+    // refused at any step has still consumed it and a retry must bring a
+    // fresh one. Recording only accepted nonces would let a refused request
+    // be replayed until something changed and it was accepted.
     if (this.seenNonces.has(n)) {
-      throw new DenyError('ERR_NONCE_REUSED', 'this Registry has already accepted a request with this nonce');
+      throw new DenyError('ERR_NONCE_REUSED', 'this Registry has already seen a request with this nonce');
     }
-
-    // §10.1 Check 1 — from the parent's certificate, never from the request.
-    assertCanSpawn(parentTemplate, body.subject);
-    // §10.3 — child scopes within the parent's. A child issued with no scopes
-    // at all is refused HERE too, not only later at the pipeline's stage 8 —
-    // the Registry should not mint what the relying party will then refuse.
-    validateScopeSet(body.allowed_scopes, 'allowed_scopes');
-    if (body.allowed_scopes.length === 0) {
-      throw new DenyError('ERR_EMPTY_SCOPES', 'a child template must declare at least one scope');
-    }
-    const held = new Set(parentTemplate.allowed_scopes);
-    const excess = body.allowed_scopes.filter((s) => !held.has(s));
-    if (excess.length) {
-      throw new DenyError('ERR_SCOPE_ESCALATION',
-        `child would hold [${excess.join(', ')}], which the parent does not`);
-    }
-
-    // Only now is the nonce spent: `issue()` re-runs the §9.1 gate and
-    // re-verifies both attestation signatures, and a request that fails THERE
-    // must be retryable under the same nonce — the nonce names the SPAWN
-    // REQUEST, and a request the Registry never accepted was never spent.
-    const issued = await this.issue(attested, {
-      subjectKeys, now,
-      spawn: { parent_agent_id: parentTemplate.subject, spawned_at: at, spawn_nonce: n },
-    });
     this.seenNonces.add(n);
-    return issued;
+
+    const crossOrg = body.org_id !== parentTemplate.org_id;
+    const requested = Array.isArray(body.allowed_scopes) ? [...body.allowed_scopes] : [];
+    let grantId = null;
+    const record = (outcome, reason = null) => this.audit.append(spawnEntry({
+      spawningAgentId: parentTemplate.subject, childTemplateId: body.subject,
+      requestedScopes: requested, spawnNonce: n, grantId, outcome, reason,
+    }), now);
+
+    try {
+      // §19.2 — more than sixty seconds from this clock, either direction, is
+      // refused. The measured offset goes in the detail so the boundary is
+      // visible rather than "roughly a minute".
+      const offsetMs = new Date(at).getTime() - now.getTime();
+      if (Math.abs(offsetMs) > FRESHNESS_WINDOW_MS) {
+        const s = (Math.abs(offsetMs) / 1000).toFixed(1);
+        throw new DenyError('ERR_SPAWN_STALE',
+          `request timestamp is ${s} s in the ${offsetMs < 0 ? 'past' : 'future'}; the window is 60 s`);
+      }
+
+      // Step 1 — §10.1 Check 1, from the parent's certificate, never from the request.
+      assertCanSpawn(parentTemplate, body.subject);
+
+      // Step 2 — registered (this Registry attested it: the gate above), and
+      // owned by the parent's organization or granted to it (§13).
+      if (crossOrg) {
+        if (!grant) {
+          throw new DenyError('ERR_GRANT_MISSING',
+            `${body.org_id} has issued no grant to ${parentTemplate.org_id} — no implicit trust exists between organizations`);
+        }
+        const under = (this.grantSpawns.get(grant?.body?.grant_id) ?? 0) + 1;
+        const g = await validateGrant({
+          grant, childTemplate: body, parentTemplate,
+          ownerCertPem: this.authorities.owner.cert_pem, paCertPem: this.authorities.pa.cert_pem,
+          now, spawnsUnderGrant: under,
+        });
+        grantId = g.grant_id;
+      }
+
+      // Step 3 — the policy in force for the parent, through its policy_ref.
+      const policy = this.policyInForce(parentTemplate.policy_ref);
+      if (!policy) {
+        throw new DenyError('ERR_SPAWN_NOT_IN_POLICY',
+          `no policy is in force for ${parentTemplate.subject.slice(0, 8)}… — no policy grants no spawn targets`);
+      }
+      const targets = Array.isArray(policy.spawn_targets) ? policy.spawn_targets : [];
+      if (!targets.includes(body.subject)) {
+        throw new DenyError('ERR_SPAWN_NOT_IN_POLICY',
+          `the policy in force (version ${policy.version}) grants ${targets.length} spawn target(s), and the child is not among them — CanSpawn is the ceiling, SpawnTargets is what is currently authorized within it`);
+      }
+
+      // Step 4 — §10.3: child scopes within the parent's. A child issued with
+      // no scopes at all is refused HERE too, not only later at the pipeline's
+      // stage 8 — the Registry should not mint what the relying party will
+      // then refuse.
+      validateScopeSet(body.allowed_scopes, 'allowed_scopes');
+      if (body.allowed_scopes.length === 0) {
+        throw new DenyError('ERR_EMPTY_SCOPES', 'a child template must declare at least one scope');
+      }
+      const held = new Set(parentTemplate.allowed_scopes);
+      const excess = body.allowed_scopes.filter((s) => !held.has(s));
+      if (excess.length) {
+        throw new DenyError('ERR_SCOPE_ESCALATION',
+          `child would hold [${excess.join(', ')}], which the parent does not`);
+      }
+
+      // Step 5 — the count this Registry holds, compared atomically with
+      // recording the child (a page is single-threaded; a deployment locks),
+      // and one live certificate per template (§12.1).
+      const kids = this.children.get(parentTemplate.subject) ?? new Set();
+      if (kids.size >= parentTemplate.max_children) {
+        throw new DenyError('ERR_MAX_CHILDREN',
+          `the parent has ${kids.size} live child(ren) and its MaxChildren is ${parentTemplate.max_children} — enforced here, by the Registry that holds the count`);
+      }
+      const liveUntil = this.live.get(body.subject);
+      if (liveUntil && liveUntil > now) {
+        throw new DenyError('ERR_DUPLICATE_SUBJECT',
+          `a certificate for ${body.subject.slice(0, 8)}… is live until ${liveUntil.toISOString()} — a template defines one agent, and one identity holds one certificate (§10.2 step 5)`);
+      }
+
+      // Step 6 — issuance, which re-runs the §9.1 gate and re-verifies both
+      // attestation signatures; a refusal there is a refusal of this request.
+      const spawn = { parent_agent_id: parentTemplate.subject, spawned_at: at, spawn_nonce: n };
+      if (grantId) spawn.grant_id = grantId;
+      const issued = await this.issue(attested, { subjectKeys, now, spawn, record: false });
+      kids.add(body.subject);
+      this.children.set(parentTemplate.subject, kids);
+      if (grantId) this.grantSpawns.set(grantId, (this.grantSpawns.get(grantId) ?? 0) + 1);
+      await record('ALLOWED');
+      return issued;
+    } catch (e) {
+      // §10.4 — a refused request is recorded for the same reason an accepted
+      // one is: a sequence of refusals is the evidence of an attempt.
+      if (e instanceof DenyError) await record('DENIED', `${e.code}: ${e.detail || e.title}`);
+      throw e;
+    }
   }
 }
 
 /**
  * Mint a complete trust structure: Registry (CA, Owner, PA), a root
- * orchestrator, and optionally one child spawned from it.
+ * orchestrator with a policy in force granting it its child, and optionally
+ * that child spawned from it.
  *
  * @param {object}   opts
  * @param {object}   opts.parent    the parent's template members (§8.2)
@@ -568,10 +789,14 @@ export async function mintChain({ parent, child = null, now = new Date(), onProg
 
   onProgress(`agent ${parent.subject.slice(0, 8)}`, 4, total);
   const parentAgent = await registry.issue(await registry.attest(parent), { now });
+  // §10.2 step 3 needs a policy in force before anything can be spawned. The
+  // parent's grants exactly the child it is about to spawn, and nothing else.
+  const policies = [await registry.adoptPolicyFor(parent, { spawnTargets: child ? [child.subject] : [], now })];
   const agents = [parentAgent];
   if (child) {
     onProgress(`agent ${child.subject.slice(0, 8)}`, 5, total);
     agents.push(await registry.spawn({ attested: await registry.attest(child), parent, now }));
+    policies.push(await registry.adoptPolicyFor(child, { spawnTargets: [], now }));
   }
 
   const strip = ({ common_name, cert_pem, key_pem, privateKey }) => ({ common_name, cert_pem, key_pem, privateKey });
@@ -580,6 +805,7 @@ export async function mintChain({ parent, child = null, now = new Date(), onProg
     ca: strip(registry.ca),
     authorities: { owner: strip(registry.authorities.owner), pa: strip(registry.authorities.pa) },
     agents,
+    policies,
   };
 }
 
@@ -604,4 +830,3 @@ export function newAgentId() {
   const hex = Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
-

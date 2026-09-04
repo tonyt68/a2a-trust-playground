@@ -4,10 +4,10 @@
  * cross-organizational grant (§13.2).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { assertNotRevoked, assertSpawnPermitted, assertScopeSubset, validateGrant } from '../src/bounds.js';
+import { assertNotRevoked, assertSpawnPermitted, assertSpawnInPolicy, assertScopeSubset, validateGrant } from '../src/bounds.js';
 import { buildDefaultDocument } from '../src/defaults.js';
 import { signEnvelope, privateKeyFromPem } from '../src/crypto-sign.js';
-import { childOf, parentOf, templateOf, spawnAcrossOrganizations } from '../src/scenarios.js';
+import { childOf, parentOf, templateOf, spawnOf, spawnAcrossOrganizations } from '../src/scenarios.js';
 import { DenyError } from '../src/errors.js';
 
 const refuses = async (code, promise) => {
@@ -56,6 +56,18 @@ describe('stage 7 — Check 1 from the parent’s certificate (§10.1) and the M
   });
   it('refuses a malformed child id before consulting the whitelist', () =>
     throwsCode('ERR_AGENT_ID_FORMAT', () => assertSpawnPermitted({ parentTemplate: parent, childId: 'not-a-uuid' })));
+});
+
+describe('stage 7 — §10.2 step 3, the policy in force', () => {
+  it('permits a child the policy names', () =>
+    expect(() => assertSpawnInPolicy({ policy: { version: 1, spawn_targets: [B] }, childId: B })).not.toThrow());
+  it('refuses a child the policy omits, an absent spawn_targets, and no policy at all — absent grants nothing (§11.4)', async () => {
+    await throwsCode('ERR_SPAWN_NOT_IN_POLICY', () => assertSpawnInPolicy({ policy: { version: 3, spawn_targets: [A] }, childId: B }));
+    await throwsCode('ERR_SPAWN_NOT_IN_POLICY', () => assertSpawnInPolicy({ policy: { version: 1 }, childId: B }));
+    const e = await throwsCode('ERR_SPAWN_NOT_IN_POLICY', () => assertSpawnInPolicy({ policy: null, childId: B, parentId: A }));
+    expect(e.detail).toMatch(/no policy is in force/);
+    expect(e.section).toBe('10.2');
+  });
 });
 
 describe('stage 8 — scope containment (§10.3)', () => {
@@ -123,6 +135,13 @@ describe('cross-organizational grants (§13.2)', () => {
   it('refuses an envelope member the draft does not define, and a content_hash on a grant', async () => {
     let d = clone(); d.grant.nonce = 'x'; await refuses('ERR_ENVELOPE_MEMBER', run(d));
     d = clone(); d.grant.content_hash = '00'; await refuses('ERR_ENVELOPE_MEMBER', run(d));
+  });
+  it('carries a grant_id, a UUID, which the child’s certificate names (§10.5, §13.2)', async () => {
+    const body = await run(clone());
+    expect(body.grant_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(spawnOf(childOf(base)).grant_id).toBe(body.grant_id);
+    const d = clone(); d.grant.body.grant_id = 'not-a-uuid'; await resign(d);
+    expect((await refuses('ERR_GRANT_INVALID', run(d))).detail).toMatch(/grant_id/);
   });
   it('refuses a missing, extra, or mistyped field', async () => {
     let d = clone(); delete d.grant.body.issued_at; await refuses('ERR_GRANT_INVALID', run(d));

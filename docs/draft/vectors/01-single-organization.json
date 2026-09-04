@@ -1,30 +1,30 @@
 {
   "draft": "draft-tonyai-a2a-trust-03",
-  "generated_at": "2026-09-04T16:24:28.095Z",
-  "note": "Every signature is ECDSA P-256 with SHA-256, fixed-width r‖s, base64 (§3.1 Table 2). Signatures are randomized: verify them, do not compare them. Certificates carry the Agent Template extension (§8.2) and, on the child, the Agent Spawn extension (§10.5), both critical. openssl verify refuses them by design; openssl verify -ignore_critical accepts them.",
+  "generated_at": "2026-09-04T17:48:20.818Z",
+  "note": "Every signature is ECDSA P-256 with SHA-256, fixed-width r‖s, base64 (§3.1 Table 2). Signatures are randomized: verify them, do not compare them. Certificates carry the Agent Template extension (§8.2) and, on the child, the Agent Spawn extension (§10.5, grant_id present exactly when the spawn crossed organizations), both critical. `policies` are the envelopes the Registry holds in force (§11.4), which §10.2 step 3 was evaluated against; `audit` is the Registry's log, its spawn entry shaped as §10.4 Table 6. openssl verify refuses the certificates by design; openssl verify -ignore_critical accepts them.",
   "description": "One Registry, a root orchestrator, one child spawned from it, and a dual-signed policy narrowing the child within its ceiling. Expected verdict: PASS.",
   "document": {
     "chain": [
       {
         "role": "ca",
-        "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIDFTCCArugAwIBAgIVAOda0zH8DpnGfe3Kzja8k+WQbWqLMAoGCCqGSM49BAMC\nMHsxCzAJBgNVBAYMAlVTMSEwHwYDVQQKDBhQaGFsYW54QUkgQTJBIFBsYXlncm91\nbmQxJzAlBgNVBAsMHkRFTU8gT05MWSAtIE5PVCBGT1IgUFJPRFVDVElPTjEgMB4G\nA1UEAwwXQTJBLVRydXN0LVBsYXlncm91bmQtQ0EwHhcNMjYwOTA0MTYyNDI4WhcN\nMjYwOTA1MTYyNDI4WjB7MQswCQYDVQQGDAJVUzEhMB8GA1UECgwYUGhhbGFueEFJ\nIEEyQSBQbGF5Z3JvdW5kMScwJQYDVQQLDB5ERU1PIE9OTFkgLSBOT1QgRk9SIFBS\nT0RVQ1RJT04xIDAeBgNVBAMMF0EyQS1UcnVzdC1QbGF5Z3JvdW5kLUNBMFkwEwYH\nKoZIzj0CAQYIKoZIzj0DAQcDQgAEKL7WVsVFLmFlyaLXK0jS2/BtGz19CkCSpVY4\napqGT0O55qFWeFSzNxo7jU1NxV4t1knzHygrm+mo1jf/O5pExqOCARowggEWMBIG\nA1UdEwEB/wQIMAYBAf8CAQAwDgYDVR0PAQH/BAQDAgAGMGgGE2mrsd3srbjqlLeA\n9Njt+/O5000EUQxPUGhhbGFueEFJIEEyQSBQbGF5Z3JvdW5kIC0gZGVtb25zdHJh\ndGlvbiBvbmx5LCBub3QgdmFsaWQgZm9yIGFueSBwcm9kdWN0aW9uIHVzZTCBhQYD\nVR0eAQH/BHsweaB3MF2kWzBZMQswCQYDVQQGDAJVUzEhMB8GA1UECgwYUGhhbGFu\neEFJIEEyQSBQbGF5Z3JvdW5kMScwJQYDVQQLDB5ERU1PIE9OTFkgLSBOT1QgRk9S\nIFBST0RVQ1RJT04wCoIILmludmFsaWQwCoEILmludmFsaWQwCgYIKoZIzj0EAwID\nSAAwRQIhAOynIFEtR4e0xkGC0hdgiQUgV4uMcO0ADqlKMCKvNYeEAiBxYgqPgImL\nIgktqz10UlAlMqd5EALXM0R2aPQrbNeFZg==\n-----END CERTIFICATE-----\n",
+        "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIDEjCCArmgAwIBAgITAjia+PCmypXIgHgdX2IT3AfuBTAKBggqhkjOPQQDAjB7\nMQswCQYDVQQGDAJVUzEhMB8GA1UECgwYUGhhbGFueEFJIEEyQSBQbGF5Z3JvdW5k\nMScwJQYDVQQLDB5ERU1PIE9OTFkgLSBOT1QgRk9SIFBST0RVQ1RJT04xIDAeBgNV\nBAMMF0EyQS1UcnVzdC1QbGF5Z3JvdW5kLUNBMB4XDTI2MDkwNDE3NDgyMFoXDTI2\nMDkwNTE3NDgyMFowezELMAkGA1UEBgwCVVMxITAfBgNVBAoMGFBoYWxhbnhBSSBB\nMkEgUGxheWdyb3VuZDEnMCUGA1UECwweREVNTyBPTkxZIC0gTk9UIEZPUiBQUk9E\nVUNUSU9OMSAwHgYDVQQDDBdBMkEtVHJ1c3QtUGxheWdyb3VuZC1DQTBZMBMGByqG\nSM49AgEGCCqGSM49AwEHA0IABNdWZxD01n2bPXrgcmDbyTUm9aW32lc/y129/aVn\ngQtNed1ogjTEMO32WxFojregJhBenzBjYy8Svz1AK3VDy8GjggEaMIIBFjASBgNV\nHRMBAf8ECDAGAQH/AgEAMA4GA1UdDwEB/wQEAwIABjBoBhNpq7Hd7K246pS3gPTY\n7fvzudNNBFEMT1BoYWxhbnhBSSBBMkEgUGxheWdyb3VuZCAtIGRlbW9uc3RyYXRp\nb24gb25seSwgbm90IHZhbGlkIGZvciBhbnkgcHJvZHVjdGlvbiB1c2UwgYUGA1Ud\nHgEB/wR7MHmgdzBdpFswWTELMAkGA1UEBgwCVVMxITAfBgNVBAoMGFBoYWxhbnhB\nSSBBMkEgUGxheWdyb3VuZDEnMCUGA1UECwweREVNTyBPTkxZIC0gTk9UIEZPUiBQ\nUk9EVUNUSU9OMAqCCC5pbnZhbGlkMAqBCC5pbnZhbGlkMAoGCCqGSM49BAMCA0cA\nMEQCICOixZ1mBmFK7AKY2ZtLU8iOJCwLP2BPp477VIn8mqjAAiBwmFtsgDwBA53/\naAXJg1n9qNUMBxFz01Jo4ktHv7hMtQ==\n-----END CERTIFICATE-----\n",
         "metadata": {
           "subject": "A2A-Trust-Playground-CA"
         }
       },
       {
         "role": "agent",
-        "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIEcjCCBBigAwIBAgIVAID0zsT2+uGFE8+7fWKAeY6mcf1RMAoGCCqGSM49BAMC\nMHsxCzAJBgNVBAYMAlVTMSEwHwYDVQQKDBhQaGFsYW54QUkgQTJBIFBsYXlncm91\nbmQxJzAlBgNVBAsMHkRFTU8gT05MWSAtIE5PVCBGT1IgUFJPRFVDVElPTjEgMB4G\nA1UEAwwXQTJBLVRydXN0LVBsYXlncm91bmQtQ0EwHhcNMjYwOTA0MTYyNDI4WhcN\nMjYwOTA1MTYyNDI4WjCBiDELMAkGA1UEBgwCVVMxITAfBgNVBAoMGFBoYWxhbnhB\nSSBBMkEgUGxheWdyb3VuZDEnMCUGA1UECwweREVNTyBPTkxZIC0gTk9UIEZPUiBQ\nUk9EVUNUSU9OMS0wKwYDVQQDDCQwMWEwNmQzYy01ZWMyLTdjYTgtOWFiNi02Y2Q1\nODhiZWJhNmMwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAR/5N9y1FTC9S70h51G\nflxWD2G7mG90759lRJEX97Ovtg4CvEXy3FcoFHCoq6mopA5f+/Hw0JETUAmuqDCb\nsM2Ao4ICaTCCAmUwDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCAIAwaAYTaaux\n3eytuOqUt4D02O3787nTTQRRDE9QaGFsYW54QUkgQTJBIFBsYXlncm91bmQgLSBk\nZW1vbnN0cmF0aW9uIG9ubHksIG5vdCB2YWxpZCBmb3IgYW55IHByb2R1Y3Rpb24g\ndXNlMBYGA1UdJQEB/wQMMAoGCCsGAQUFBwMCMDkGA1UdHwQyMDAwLqAsoCqGKGh0\ndHA6Ly9jcmwuYTJhLXBsYXlncm91bmQuaW52YWxpZC9jYS5jcmwwggGGBhRpg9/N\n7/r9gvKj8Zuiz5G9kKStOwEB/wSCAWl7ImFsbG93ZWRfc2NvcGVzIjpbInJlYWQ6\nZXZlbnRzIiwid3JpdGU6ZXZlbnRzIl0sImNhbl9zcGF3biI6WyIwMWEwNmQzYy01\nZWMyLTc5NDctYjg3OC0wOTQ5ZTQ5M2UwZmEiXSwibWF4X2NoaWxkcmVuIjoyLCJv\ncmdfaWQiOiJwbGF5Z3JvdW5kLW9yZyIsIm93bmVyIjoib3duZXItYXV0aG9yaXR5\nIiwicGVybWl0dGVkX29wZXJhdGlvbnMiOlsic3Bhd24iLCJyZWFkIiwid3JpdGUi\nXSwicG9saWN5X3JlZiI6InBvbGljeS1zdG9yZS8wMWEwNmQzYy01ZWMyLTdjYTgt\nOWFiNi02Y2Q1ODhiZWJhNmMvY3VycmVudCIsInN1YmplY3QiOiIwMWEwNmQzYy01\nZWMyLTdjYTgtOWFiNi02Y2Q1ODhiZWJhNmMiLCJ0dGxfc2Vjb25kcyI6ODY0MDB9\nMAoGCCqGSM49BAMCA0gAMEUCIFfEXRktEzkXkiw0c0t0ReCZFQB4Yp1PwRgPbcFS\ndwo0AiEA2obF1y1c1HWRLC2nn/S/HdyvzalKlgZJBHh0c+rhIoE=\n-----END CERTIFICATE-----\n",
+        "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIEcTCCBBegAwIBAgIUAIfa5WpSL4vqxZI29azUyn8KIUEwCgYIKoZIzj0EAwIw\nezELMAkGA1UEBgwCVVMxITAfBgNVBAoMGFBoYWxhbnhBSSBBMkEgUGxheWdyb3Vu\nZDEnMCUGA1UECwweREVNTyBPTkxZIC0gTk9UIEZPUiBQUk9EVUNUSU9OMSAwHgYD\nVQQDDBdBMkEtVHJ1c3QtUGxheWdyb3VuZC1DQTAeFw0yNjA5MDQxNzQ4MjBaFw0y\nNjA5MDUxNzQ4MjBaMIGIMQswCQYDVQQGDAJVUzEhMB8GA1UECgwYUGhhbGFueEFJ\nIEEyQSBQbGF5Z3JvdW5kMScwJQYDVQQLDB5ERU1PIE9OTFkgLSBOT1QgRk9SIFBS\nT0RVQ1RJT04xLTArBgNVBAMMJDAxYTA2ZDg5LTI5ZDQtNzU2My1hODU4LWEwZDJl\nNmRhMTNjODBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABGhIhzIGcMZ/vRqsHZxS\nS9zd4D9G6K4ehCZyYkrdBcsHXtdnMiiW/D8z4QfPIhqAnLRBNqocuGn1bTUwBXSj\nkjyjggJpMIICZTAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIAgDBoBhNpq7Hd\n7K246pS3gPTY7fvzudNNBFEMT1BoYWxhbnhBSSBBMkEgUGxheWdyb3VuZCAtIGRl\nbW9uc3RyYXRpb24gb25seSwgbm90IHZhbGlkIGZvciBhbnkgcHJvZHVjdGlvbiB1\nc2UwFgYDVR0lAQH/BAwwCgYIKwYBBQUHAwIwOQYDVR0fBDIwMDAuoCygKoYoaHR0\ncDovL2NybC5hMmEtcGxheWdyb3VuZC5pbnZhbGlkL2NhLmNybDCCAYYGFGmD383v\n+v2C8qPxm6LPkb2QpK07AQH/BIIBaXsiYWxsb3dlZF9zY29wZXMiOlsicmVhZDpl\ndmVudHMiLCJ3cml0ZTpldmVudHMiXSwiY2FuX3NwYXduIjpbIjAxYTA2ZDg5LTI5\nZDQtN2EzNy1hYzAwLTAzYWVjMzdiMzVjMyJdLCJtYXhfY2hpbGRyZW4iOjEsIm9y\nZ19pZCI6InBsYXlncm91bmQtb3JnIiwib3duZXIiOiJvd25lci1hdXRob3JpdHki\nLCJwZXJtaXR0ZWRfb3BlcmF0aW9ucyI6WyJzcGF3biIsInJlYWQiLCJ3cml0ZSJd\nLCJwb2xpY3lfcmVmIjoicG9saWN5LXN0b3JlLzAxYTA2ZDg5LTI5ZDQtNzU2My1h\nODU4LWEwZDJlNmRhMTNjOC9jdXJyZW50Iiwic3ViamVjdCI6IjAxYTA2ZDg5LTI5\nZDQtNzU2My1hODU4LWEwZDJlNmRhMTNjOCIsInR0bF9zZWNvbmRzIjo4NjQwMH0w\nCgYIKoZIzj0EAwIDSAAwRQIgSAvP34Brx+tKDuosvrb1bnvS0ziEVN0WysSwm2px\nfbkCIQCxhrRPTeGsawCFWksL0pw1SvlYldcd7hZcOGTEiHIvNg==\n-----END CERTIFICATE-----\n",
         "metadata": {
-          "agent_id": "01a06d3c-5ec2-7ca8-9ab6-6cd588beba6c"
+          "agent_id": "01a06d89-29d4-7563-a858-a0d2e6da13c8"
         }
       },
       {
         "role": "agent",
-        "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIE1jCCBH2gAwIBAgIVAJqFCf5lu5My1MSB4nRDUX6v51mZMAoGCCqGSM49BAMC\nMHsxCzAJBgNVBAYMAlVTMSEwHwYDVQQKDBhQaGFsYW54QUkgQTJBIFBsYXlncm91\nbmQxJzAlBgNVBAsMHkRFTU8gT05MWSAtIE5PVCBGT1IgUFJPRFVDVElPTjEgMB4G\nA1UEAwwXQTJBLVRydXN0LVBsYXlncm91bmQtQ0EwHhcNMjYwOTA0MTYyNDI4WhcN\nMjYwOTA1MDQyNDI4WjCBiDELMAkGA1UEBgwCVVMxITAfBgNVBAoMGFBoYWxhbnhB\nSSBBMkEgUGxheWdyb3VuZDEnMCUGA1UECwweREVNTyBPTkxZIC0gTk9UIEZPUiBQ\nUk9EVUNUSU9OMS0wKwYDVQQDDCQwMWEwNmQzYy01ZWMyLTc5NDctYjg3OC0wOTQ5\nZTQ5M2UwZmEwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAS1Jep4OJWFUa+axq7l\nMTRLB8Eq24lTCnxtPZIbwDLUwrQM7XS8a5OnwvZBGWKOFp4iggMQgXjqn8hO8oQD\nxIazo4ICzjCCAsowDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCAIAwaAYTaaux\n3eytuOqUt4D02O3787nTTQRRDE9QaGFsYW54QUkgQTJBIFBsYXlncm91bmQgLSBk\nZW1vbnN0cmF0aW9uIG9ubHksIG5vdCB2YWxpZCBmb3IgYW55IHByb2R1Y3Rpb24g\ndXNlMBYGA1UdJQEB/wQMMAoGCCsGAQUFBwMCMDkGA1UdHwQyMDAwLqAsoCqGKGh0\ndHA6Ly9jcmwuYTJhLXBsYXlncm91bmQuaW52YWxpZC9jYS5jcmwwggFBBhRpg9/N\n7/r9gvKj8Zuiz5G9kKStOwEB/wSCASR7ImFsbG93ZWRfc2NvcGVzIjpbInJlYWQ6\nZXZlbnRzIl0sImNhbl9zcGF3biI6W10sIm1heF9jaGlsZHJlbiI6MCwib3JnX2lk\nIjoicGxheWdyb3VuZC1vcmciLCJvd25lciI6Im93bmVyLWF1dGhvcml0eSIsInBl\ncm1pdHRlZF9vcGVyYXRpb25zIjpbInJlYWQiXSwicG9saWN5X3JlZiI6InBvbGlj\neS1zdG9yZS8wMWEwNmQzYy01ZWMyLTc5NDctYjg3OC0wOTQ5ZTQ5M2UwZmEvY3Vy\ncmVudCIsInN1YmplY3QiOiIwMWEwNmQzYy01ZWMyLTc5NDctYjg3OC0wOTQ5ZTQ5\nM2UwZmEiLCJ0dGxfc2Vjb25kcyI6NDMyMDB9MIGnBhRpg9vTtKTz8LqB9ZWvkePQ\nqeDUAAEB/wSBi3sicGFyZW50X2FnZW50X2lkIjoiMDFhMDZkM2MtNWVjMi03Y2E4\nLTlhYjYtNmNkNTg4YmViYTZjIiwic3Bhd25fbm9uY2UiOiIwSzJ3TSs3RHJOblFQ\nQkJMZitCdVRnPT0iLCJzcGF3bmVkX2F0IjoiMjAyNi0wOS0wNFQxNjoyNDoyOC4w\nOTVaIn0wCgYIKoZIzj0EAwIDRwAwRAIgS+7IX9XngnS48TclLS/5I0yCuKfWPNZo\n+K9uqfSweJACIBamy3IPSnI9itQqNjEcXV4nvomNU8oK10YYeEaiW5Vm\n-----END CERTIFICATE-----\n",
+        "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIE1zCCBHygAwIBAgIUAPt40dKOpK/coqVNtNuc2YUHhDswCgYIKoZIzj0EAwIw\nezELMAkGA1UEBgwCVVMxITAfBgNVBAoMGFBoYWxhbnhBSSBBMkEgUGxheWdyb3Vu\nZDEnMCUGA1UECwweREVNTyBPTkxZIC0gTk9UIEZPUiBQUk9EVUNUSU9OMSAwHgYD\nVQQDDBdBMkEtVHJ1c3QtUGxheWdyb3VuZC1DQTAeFw0yNjA5MDQxNzQ4MjBaFw0y\nNjA5MDUwNTQ4MjBaMIGIMQswCQYDVQQGDAJVUzEhMB8GA1UECgwYUGhhbGFueEFJ\nIEEyQSBQbGF5Z3JvdW5kMScwJQYDVQQLDB5ERU1PIE9OTFkgLSBOT1QgRk9SIFBS\nT0RVQ1RJT04xLTArBgNVBAMMJDAxYTA2ZDg5LTI5ZDQtN2EzNy1hYzAwLTAzYWVj\nMzdiMzVjMzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABAxINJg/dsgqm4Bt4XYP\neQDrkiBXxmyX81zq3UFduaJSVBXiZx8FPnwousf/Ovd7d3Wq0SJCwqTlfiLwn6tB\nfbyjggLOMIICyjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIAgDBoBhNpq7Hd\n7K246pS3gPTY7fvzudNNBFEMT1BoYWxhbnhBSSBBMkEgUGxheWdyb3VuZCAtIGRl\nbW9uc3RyYXRpb24gb25seSwgbm90IHZhbGlkIGZvciBhbnkgcHJvZHVjdGlvbiB1\nc2UwFgYDVR0lAQH/BAwwCgYIKwYBBQUHAwIwOQYDVR0fBDIwMDAuoCygKoYoaHR0\ncDovL2NybC5hMmEtcGxheWdyb3VuZC5pbnZhbGlkL2NhLmNybDCCAUEGFGmD383v\n+v2C8qPxm6LPkb2QpK07AQH/BIIBJHsiYWxsb3dlZF9zY29wZXMiOlsicmVhZDpl\ndmVudHMiXSwiY2FuX3NwYXduIjpbXSwibWF4X2NoaWxkcmVuIjowLCJvcmdfaWQi\nOiJwbGF5Z3JvdW5kLW9yZyIsIm93bmVyIjoib3duZXItYXV0aG9yaXR5IiwicGVy\nbWl0dGVkX29wZXJhdGlvbnMiOlsicmVhZCJdLCJwb2xpY3lfcmVmIjoicG9saWN5\nLXN0b3JlLzAxYTA2ZDg5LTI5ZDQtN2EzNy1hYzAwLTAzYWVjMzdiMzVjMy9jdXJy\nZW50Iiwic3ViamVjdCI6IjAxYTA2ZDg5LTI5ZDQtN2EzNy1hYzAwLTAzYWVjMzdi\nMzVjMyIsInR0bF9zZWNvbmRzIjo0MzIwMH0wgacGFGmD29O0pPPwuoH1la+R49Cp\n4NQAAQH/BIGLeyJwYXJlbnRfYWdlbnRfaWQiOiIwMWEwNmQ4OS0yOWQ0LTc1NjMt\nYTg1OC1hMGQyZTZkYTEzYzgiLCJzcGF3bl9ub25jZSI6IjFwSlFKVG5iTVQ5elZQ\nNGJUaHVnY1E9PSIsInNwYXduZWRfYXQiOiIyMDI2LTA5LTA0VDE3OjQ4OjIwLjgx\nOFoifTAKBggqhkjOPQQDAgNJADBGAiEAvrymuufSQXSDCcxRN9t5MAyBgPSzfsYu\niA+gcoya11gCIQD9ZfiCW9xCI12EMfe2bVYU1iF7yl+ZMb+XdXZxh6R2tA==\n-----END CERTIFICATE-----\n",
         "metadata": {
-          "agent_id": "01a06d3c-5ec2-7947-b878-0949e493e0fa",
-          "parent_agent_id": "01a06d3c-5ec2-7ca8-9ab6-6cd588beba6c"
+          "agent_id": "01a06d89-29d4-7a37-ac00-03aec37b35c3",
+          "parent_agent_id": "01a06d89-29d4-7563-a858-a0d2e6da13c8"
         },
         "requested_scopes": [
           "read:events"
@@ -34,86 +34,133 @@
     "authorities": {
       "owner": {
         "common_name": "owner-authority",
-        "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIC0DCCAnagAwIBAgIVAKMc2Vkc30UmFiVcPNam78CQqdY5MAoGCCqGSM49BAMC\nMHsxCzAJBgNVBAYMAlVTMSEwHwYDVQQKDBhQaGFsYW54QUkgQTJBIFBsYXlncm91\nbmQxJzAlBgNVBAsMHkRFTU8gT05MWSAtIE5PVCBGT1IgUFJPRFVDVElPTjEgMB4G\nA1UEAwwXQTJBLVRydXN0LVBsYXlncm91bmQtQ0EwHhcNMjYwOTA0MTYyNDI4WhcN\nMjYwOTA1MTYyNDI4WjBzMQswCQYDVQQGDAJVUzEhMB8GA1UECgwYUGhhbGFueEFJ\nIEEyQSBQbGF5Z3JvdW5kMScwJQYDVQQLDB5ERU1PIE9OTFkgLSBOT1QgRk9SIFBS\nT0RVQ1RJT04xGDAWBgNVBAMMD293bmVyLWF1dGhvcml0eTBZMBMGByqGSM49AgEG\nCCqGSM49AwEHA0IABCA6MCtLgyOHLraej8p4ZHjIF5lVSRYvGihvJ34j7p8pdJFl\n9F7QwzFRT9o/n33D3058Lj1JDHMzSV+mIko6GDyjgd4wgdswDAYDVR0TAQH/BAIw\nADAOBgNVHQ8BAf8EBAMCAIAwaAYTaaux3eytuOqUt4D02O3787nTTQRRDE9QaGFs\nYW54QUkgQTJBIFBsYXlncm91bmQgLSBkZW1vbnN0cmF0aW9uIG9ubHksIG5vdCB2\nYWxpZCBmb3IgYW55IHByb2R1Y3Rpb24gdXNlMBYGA1UdJQEB/wQMMAoGCCsGAQUF\nBwMCMDkGA1UdHwQyMDAwLqAsoCqGKGh0dHA6Ly9jcmwuYTJhLXBsYXlncm91bmQu\naW52YWxpZC9jYS5jcmwwCgYIKoZIzj0EAwIDSAAwRQIhALE7F8RL5DcPFhd4qXn6\n1oIgodpFSU8gGJ9bKG61qipgAiBo8T+1e3vRFXu3o3OXEdhsoMAufrpp1f0HoDom\nB34/8A==\n-----END CERTIFICATE-----\n"
+        "cert_pem": "-----BEGIN CERTIFICATE-----\nMIICzzCCAnSgAwIBAgITcnOtCHGyp+SbOTCWU5Qy13dTFzAKBggqhkjOPQQDAjB7\nMQswCQYDVQQGDAJVUzEhMB8GA1UECgwYUGhhbGFueEFJIEEyQSBQbGF5Z3JvdW5k\nMScwJQYDVQQLDB5ERU1PIE9OTFkgLSBOT1QgRk9SIFBST0RVQ1RJT04xIDAeBgNV\nBAMMF0EyQS1UcnVzdC1QbGF5Z3JvdW5kLUNBMB4XDTI2MDkwNDE3NDgyMFoXDTI2\nMDkwNTE3NDgyMFowczELMAkGA1UEBgwCVVMxITAfBgNVBAoMGFBoYWxhbnhBSSBB\nMkEgUGxheWdyb3VuZDEnMCUGA1UECwweREVNTyBPTkxZIC0gTk9UIEZPUiBQUk9E\nVUNUSU9OMRgwFgYDVQQDDA9vd25lci1hdXRob3JpdHkwWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAARi1VE4rctcetJ9SsaEoYex+LMoPjFyPJxfNTCe2vl4MABQLwqH\nZ9+BKF5547AQ3a0NPU16tFqakJNE8BYhNk4Zo4HeMIHbMAwGA1UdEwEB/wQCMAAw\nDgYDVR0PAQH/BAQDAgCAMGgGE2mrsd3srbjqlLeA9Njt+/O5000EUQxPUGhhbGFu\neEFJIEEyQSBQbGF5Z3JvdW5kIC0gZGVtb25zdHJhdGlvbiBvbmx5LCBub3QgdmFs\naWQgZm9yIGFueSBwcm9kdWN0aW9uIHVzZTAWBgNVHSUBAf8EDDAKBggrBgEFBQcD\nAjA5BgNVHR8EMjAwMC6gLKAqhihodHRwOi8vY3JsLmEyYS1wbGF5Z3JvdW5kLmlu\ndmFsaWQvY2EuY3JsMAoGCCqGSM49BAMCA0kAMEYCIQCBJuPSuHz0W5Sj+IRgjX1t\nWFPR64x6GCx0wMFALR669gIhAJXKHquRBVTAttWqYoYKZzveb5qE2UjRp4cHfafW\noYah\n-----END CERTIFICATE-----\n"
       },
       "pa": {
         "common_name": "policy-authority",
-        "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIC0TCCAnegAwIBAgIVAIP3uTlgp+8RSoNdhNODlrxwKK3aMAoGCCqGSM49BAMC\nMHsxCzAJBgNVBAYMAlVTMSEwHwYDVQQKDBhQaGFsYW54QUkgQTJBIFBsYXlncm91\nbmQxJzAlBgNVBAsMHkRFTU8gT05MWSAtIE5PVCBGT1IgUFJPRFVDVElPTjEgMB4G\nA1UEAwwXQTJBLVRydXN0LVBsYXlncm91bmQtQ0EwHhcNMjYwOTA0MTYyNDI4WhcN\nMjYwOTA1MTYyNDI4WjB0MQswCQYDVQQGDAJVUzEhMB8GA1UECgwYUGhhbGFueEFJ\nIEEyQSBQbGF5Z3JvdW5kMScwJQYDVQQLDB5ERU1PIE9OTFkgLSBOT1QgRk9SIFBS\nT0RVQ1RJT04xGTAXBgNVBAMMEHBvbGljeS1hdXRob3JpdHkwWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAARSD+2ZowedptbJWeUcOMKcjJXohxyX/YlGw8Pu71p9WkeO\n74LgbicTGZSUiSD4ACzXwaQ+J/gEwKiSxv/EAFKpo4HeMIHbMAwGA1UdEwEB/wQC\nMAAwDgYDVR0PAQH/BAQDAgCAMGgGE2mrsd3srbjqlLeA9Njt+/O5000EUQxPUGhh\nbGFueEFJIEEyQSBQbGF5Z3JvdW5kIC0gZGVtb25zdHJhdGlvbiBvbmx5LCBub3Qg\ndmFsaWQgZm9yIGFueSBwcm9kdWN0aW9uIHVzZTAWBgNVHSUBAf8EDDAKBggrBgEF\nBQcDAjA5BgNVHR8EMjAwMC6gLKAqhihodHRwOi8vY3JsLmEyYS1wbGF5Z3JvdW5k\nLmludmFsaWQvY2EuY3JsMAoGCCqGSM49BAMCA0gAMEUCIQD20Eh163HYDxo97g+K\nX5ZEyQ8KAv366Jyt2rCfj+o76QIgPd3b2qYmFqlBfGCIw6yB++XdpW58zQezTg8c\n2QAp1wo=\n-----END CERTIFICATE-----\n"
+        "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIC0TCCAnagAwIBAgIUAKrTReAkgDc+HxosieN3RHHAmBswCgYIKoZIzj0EAwIw\nezELMAkGA1UEBgwCVVMxITAfBgNVBAoMGFBoYWxhbnhBSSBBMkEgUGxheWdyb3Vu\nZDEnMCUGA1UECwweREVNTyBPTkxZIC0gTk9UIEZPUiBQUk9EVUNUSU9OMSAwHgYD\nVQQDDBdBMkEtVHJ1c3QtUGxheWdyb3VuZC1DQTAeFw0yNjA5MDQxNzQ4MjBaFw0y\nNjA5MDUxNzQ4MjBaMHQxCzAJBgNVBAYMAlVTMSEwHwYDVQQKDBhQaGFsYW54QUkg\nQTJBIFBsYXlncm91bmQxJzAlBgNVBAsMHkRFTU8gT05MWSAtIE5PVCBGT1IgUFJP\nRFVDVElPTjEZMBcGA1UEAwwQcG9saWN5LWF1dGhvcml0eTBZMBMGByqGSM49AgEG\nCCqGSM49AwEHA0IABI+n3QhNhEqQqVYLh5Fk7OMKwa8lBbCO59OOXWWU5Wzb7sys\nCQi1Ki/r3ogKM2TaWhfcL3DURj1ki1TYPPc6FxGjgd4wgdswDAYDVR0TAQH/BAIw\nADAOBgNVHQ8BAf8EBAMCAIAwaAYTaaux3eytuOqUt4D02O3787nTTQRRDE9QaGFs\nYW54QUkgQTJBIFBsYXlncm91bmQgLSBkZW1vbnN0cmF0aW9uIG9ubHksIG5vdCB2\nYWxpZCBmb3IgYW55IHByb2R1Y3Rpb24gdXNlMBYGA1UdJQEB/wQMMAoGCCsGAQUF\nBwMCMDkGA1UdHwQyMDAwLqAsoCqGKGh0dHA6Ly9jcmwuYTJhLXBsYXlncm91bmQu\naW52YWxpZC9jYS5jcmwwCgYIKoZIzj0EAwIDSQAwRgIhAJpMgev+lF3+EspSBAhp\nt1AxDm7vYVG4VfCOumSfKMleAiEAt/l0Ftn6xyM6G/TFOV0J8c0hN8TEgcNVO6lR\nC4/CFwo=\n-----END CERTIFICATE-----\n"
       }
     },
     "policy": {
       "body": {
-        "subject": "01a06d3c-5ec2-7947-b878-0949e493e0fa",
+        "subject": "01a06d89-29d4-7a37-ac00-03aec37b35c3",
         "owner": "owner-authority",
         "org_id": "playground-org",
         "scopes": [
           "read:events"
         ],
         "version": 2,
-        "issued_at": "2026-09-04T16:24:28.095Z"
+        "issued_at": "2026-09-04T17:48:20.818Z"
       },
-      "owner_sig": "jUQBZecvFgSjtZFAY/9ZKKFVNmVQ8gFdxikl9CC163aaFM2m5x5NzhhdAQa87Rh+dhT6x50v5vO6Om58bO8fOA==",
-      "pa_sig": "0cD4J01iA236a5T1/rSXSpNTOQ9NR0lkZcWw3OrzKzTAoDVwfkGOnxpPD1Pgjvm/YQ8Iilr5wErzjIPoWL3+Vg==",
-      "content_hash": "30796a158b180d68c69a83d0c4704442538d20a80549e0d68fe9602076a0841f"
+      "owner_sig": "/0U5b4qOsPTYSOKEj4honLx/B5tf27dgm9M5UihCc3l+Hu4T/yCxGkW9L4KHe/2KrABOAEsh2dmHQY6sCHwyZQ==",
+      "pa_sig": "ZSCGzIdwhQI2xQwZwHKytO4NkIYaSxl6qou7va/+04i7KBw5IY8/JEU0zmmkI7kV33N6JN0FPXA/zTL+hnwZqA==",
+      "content_hash": "84a6fc522359b2501027bd24b44cb19aa2e4973305408ca7d2b6cd77c78f5f5c"
     },
+    "policies": [
+      {
+        "body": {
+          "subject": "01a06d89-29d4-7563-a858-a0d2e6da13c8",
+          "owner": "owner-authority",
+          "org_id": "playground-org",
+          "scopes": [
+            "read:events",
+            "write:events"
+          ],
+          "spawn_targets": [
+            "01a06d89-29d4-7a37-ac00-03aec37b35c3"
+          ],
+          "version": 1,
+          "issued_at": "2026-09-04T17:48:20.818Z"
+        },
+        "owner_sig": "sCcwoYN/R4jssze7UxiJTaKMI16qPbo6nN2ICQhELl5jqYN8nxhXAQoh/U5v6K5VXDfCsI0x6E7q5TLoQWzheg==",
+        "pa_sig": "gW4TaekCE8MEQNwsUp+unzKArXe/BDptRKzt8iGyEKuCo847mlYEmdEU8QLenXdPWjn6CBEZWpUwwnqjMIkODA==",
+        "content_hash": "7a3eb85893f838736f1c196dee99175e5a7d19ef8e6cacf9490b7eafeaac5f1d"
+      },
+      {
+        "body": {
+          "subject": "01a06d89-29d4-7a37-ac00-03aec37b35c3",
+          "owner": "owner-authority",
+          "org_id": "playground-org",
+          "scopes": [
+            "read:events"
+          ],
+          "spawn_targets": [],
+          "version": 1,
+          "issued_at": "2026-09-04T17:48:20.818Z"
+        },
+        "owner_sig": "Ee0IndEhvXTokNY6VF5t0fslV/2TK06TlKNie/jjqTL/bRHqXpa2wO7Dj2XmX8jbBA2GK24TyZbUayCmkHQN8Q==",
+        "pa_sig": "nqLHuGlL+AwZsXNICZYaGcn9AZRt3zHNbTvMiqhniebLl1Iu5jfOjkmWUxVyRVgCpVDfGLYUVWFduC/NwbM+Gg==",
+        "content_hash": "b7e64525686e3bcefc434b6ef1020cb6b8a917a67df705274a4e118e661f96ee"
+      }
+    ],
     "current_policy_version": 1,
     "crl": {
       "revoked": [],
       "disabled": []
     },
     "audit": {
-      "entries": 3,
-      "head_hash": "ddfc193ce451b398a560579faae92a8eaebf23f96dc9b76dc6aab757dcbcd5d9",
+      "entries": 4,
+      "head_hash": "5d45482a57818d020e89d1c35ef55f86a1be8d46d1ad986d23baf4d9be17ac71",
       "chain": [
         {
-          "index": 0,
-          "timestamp": "2026-09-04T16:22:28.095Z",
-          "previous_hash": "genesis",
-          "event": {
-            "action": "issue_template",
-            "decision": "ALLOWED",
-            "agent": "01a06d3c-5ec2-7ca8-9ab6-6cd588beba6c",
-            "detail": "parent template attested and issued by the Registry"
-          },
-          "hash": "2492ea2b297164042721137af1e33ec438e0168ab8f6b9f5ff538453f28dd3ce"
+          "action": "issue_template",
+          "outcome": "ALLOWED",
+          "agent": "01a06d89-29d4-7563-a858-a0d2e6da13c8",
+          "detail": "template attested and issued by the Registry",
+          "timestamp": "2026-09-04T17:48:20.818Z",
+          "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "entry_hash": "a8348dc1f75ee6368e1269e02b19a1a9af2aa70a609654236ff8f81a243e7ca4"
         },
         {
-          "index": 1,
-          "timestamp": "2026-09-04T16:23:28.095Z",
-          "previous_hash": "2492ea2b297164042721137af1e33ec438e0168ab8f6b9f5ff538453f28dd3ce",
-          "event": {
-            "action": "spawn_child",
-            "decision": "ALLOWED",
-            "agent": "01a06d3c-5ec2-7947-b878-0949e493e0fa",
-            "parent": "01a06d3c-5ec2-7ca8-9ab6-6cd588beba6c",
-            "detail": "two-check spawn rule satisfied; nonce fresh"
-          },
-          "hash": "0d0369245660c50fa85f1dd348493c76344932042ab32d5b9b0fd40e8b25e83e"
+          "action": "policy_update",
+          "outcome": "ALLOWED",
+          "agent": "01a06d89-29d4-7563-a858-a0d2e6da13c8",
+          "detail": "dual-signed policy in force, version 1",
+          "timestamp": "2026-09-04T17:48:20.818Z",
+          "previous_hash": "a8348dc1f75ee6368e1269e02b19a1a9af2aa70a609654236ff8f81a243e7ca4",
+          "entry_hash": "2dffa26ac3dbb5ca7063ff8549816a839d2a4e76559f91c67363d67ba3d75b48"
         },
         {
-          "index": 2,
-          "timestamp": "2026-09-04T16:23:58.095Z",
-          "previous_hash": "0d0369245660c50fa85f1dd348493c76344932042ab32d5b9b0fd40e8b25e83e",
-          "event": {
-            "action": "policy_update",
-            "decision": "ALLOWED",
-            "agent": "01a06d3c-5ec2-7947-b878-0949e493e0fa",
-            "detail": "dual-signed policy accepted, version 2"
-          },
-          "hash": "ddfc193ce451b398a560579faae92a8eaebf23f96dc9b76dc6aab757dcbcd5d9"
+          "spawning_agent_id": "01a06d89-29d4-7563-a858-a0d2e6da13c8",
+          "child_template_id": "01a06d89-29d4-7a37-ac00-03aec37b35c3",
+          "requested_scopes": [
+            "read:events"
+          ],
+          "granted_scopes": [
+            "read:events"
+          ],
+          "spawn_nonce": "1pJQJTnbMT9zVP4bThugcQ==",
+          "outcome": "ALLOWED",
+          "timestamp": "2026-09-04T17:48:20.818Z",
+          "previous_hash": "2dffa26ac3dbb5ca7063ff8549816a839d2a4e76559f91c67363d67ba3d75b48",
+          "entry_hash": "e4ca60d5487f47d54d2051bb543776c9a02e7d844696d2b38255c750c7e7218d"
+        },
+        {
+          "action": "policy_update",
+          "outcome": "ALLOWED",
+          "agent": "01a06d89-29d4-7a37-ac00-03aec37b35c3",
+          "detail": "dual-signed policy in force, version 1",
+          "timestamp": "2026-09-04T17:48:20.818Z",
+          "previous_hash": "e4ca60d5487f47d54d2051bb543776c9a02e7d844696d2b38255c750c7e7218d",
+          "entry_hash": "5d45482a57818d020e89d1c35ef55f86a1be8d46d1ad986d23baf4d9be17ac71"
         }
       ]
     }
   },
   "jcs_preimages": {
-    "agent_template_parent": "{\"allowed_scopes\":[\"read:events\",\"write:events\"],\"can_spawn\":[\"01a06d3c-5ec2-7947-b878-0949e493e0fa\"],\"max_children\":2,\"org_id\":\"playground-org\",\"owner\":\"owner-authority\",\"permitted_operations\":[\"spawn\",\"read\",\"write\"],\"policy_ref\":\"policy-store/01a06d3c-5ec2-7ca8-9ab6-6cd588beba6c/current\",\"subject\":\"01a06d3c-5ec2-7ca8-9ab6-6cd588beba6c\",\"ttl_seconds\":86400}",
-    "agent_template_child": "{\"allowed_scopes\":[\"read:events\"],\"can_spawn\":[],\"max_children\":0,\"org_id\":\"playground-org\",\"owner\":\"owner-authority\",\"permitted_operations\":[\"read\"],\"policy_ref\":\"policy-store/01a06d3c-5ec2-7947-b878-0949e493e0fa/current\",\"subject\":\"01a06d3c-5ec2-7947-b878-0949e493e0fa\",\"ttl_seconds\":43200}",
-    "agent_spawn_child": "{\"parent_agent_id\":\"01a06d3c-5ec2-7ca8-9ab6-6cd588beba6c\",\"spawn_nonce\":\"0K2wM+7DrNnQPBBLf+BuTg==\",\"spawned_at\":\"2026-09-04T16:24:28.095Z\"}",
-    "policy_body": "{\"issued_at\":\"2026-09-04T16:24:28.095Z\",\"org_id\":\"playground-org\",\"owner\":\"owner-authority\",\"scopes\":[\"read:events\"],\"subject\":\"01a06d3c-5ec2-7947-b878-0949e493e0fa\",\"version\":2}",
+    "agent_template_parent": "{\"allowed_scopes\":[\"read:events\",\"write:events\"],\"can_spawn\":[\"01a06d89-29d4-7a37-ac00-03aec37b35c3\"],\"max_children\":1,\"org_id\":\"playground-org\",\"owner\":\"owner-authority\",\"permitted_operations\":[\"spawn\",\"read\",\"write\"],\"policy_ref\":\"policy-store/01a06d89-29d4-7563-a858-a0d2e6da13c8/current\",\"subject\":\"01a06d89-29d4-7563-a858-a0d2e6da13c8\",\"ttl_seconds\":86400}",
+    "agent_template_child": "{\"allowed_scopes\":[\"read:events\"],\"can_spawn\":[],\"max_children\":0,\"org_id\":\"playground-org\",\"owner\":\"owner-authority\",\"permitted_operations\":[\"read\"],\"policy_ref\":\"policy-store/01a06d89-29d4-7a37-ac00-03aec37b35c3/current\",\"subject\":\"01a06d89-29d4-7a37-ac00-03aec37b35c3\",\"ttl_seconds\":43200}",
+    "agent_spawn_child": "{\"parent_agent_id\":\"01a06d89-29d4-7563-a858-a0d2e6da13c8\",\"spawn_nonce\":\"1pJQJTnbMT9zVP4bThugcQ==\",\"spawned_at\":\"2026-09-04T17:48:20.818Z\"}",
+    "policy_body": "{\"issued_at\":\"2026-09-04T17:48:20.818Z\",\"org_id\":\"playground-org\",\"owner\":\"owner-authority\",\"scopes\":[\"read:events\"],\"subject\":\"01a06d89-29d4-7a37-ac00-03aec37b35c3\",\"version\":2}",
+    "policies_in_force": [
+      "{\"issued_at\":\"2026-09-04T17:48:20.818Z\",\"org_id\":\"playground-org\",\"owner\":\"owner-authority\",\"scopes\":[\"read:events\",\"write:events\"],\"spawn_targets\":[\"01a06d89-29d4-7a37-ac00-03aec37b35c3\"],\"subject\":\"01a06d89-29d4-7563-a858-a0d2e6da13c8\",\"version\":1}",
+      "{\"issued_at\":\"2026-09-04T17:48:20.818Z\",\"org_id\":\"playground-org\",\"owner\":\"owner-authority\",\"scopes\":[\"read:events\"],\"spawn_targets\":[],\"subject\":\"01a06d89-29d4-7a37-ac00-03aec37b35c3\",\"version\":1}"
+    ],
     "audit_entries": [
-      "{\"event\":{\"action\":\"issue_template\",\"agent\":\"01a06d3c-5ec2-7ca8-9ab6-6cd588beba6c\",\"decision\":\"ALLOWED\",\"detail\":\"parent template attested and issued by the Registry\"},\"index\":0,\"previous_hash\":\"genesis\",\"timestamp\":\"2026-09-04T16:22:28.095Z\"}",
-      "{\"event\":{\"action\":\"spawn_child\",\"agent\":\"01a06d3c-5ec2-7947-b878-0949e493e0fa\",\"decision\":\"ALLOWED\",\"detail\":\"two-check spawn rule satisfied; nonce fresh\",\"parent\":\"01a06d3c-5ec2-7ca8-9ab6-6cd588beba6c\"},\"index\":1,\"previous_hash\":\"2492ea2b297164042721137af1e33ec438e0168ab8f6b9f5ff538453f28dd3ce\",\"timestamp\":\"2026-09-04T16:23:28.095Z\"}",
-      "{\"event\":{\"action\":\"policy_update\",\"agent\":\"01a06d3c-5ec2-7947-b878-0949e493e0fa\",\"decision\":\"ALLOWED\",\"detail\":\"dual-signed policy accepted, version 2\"},\"index\":2,\"previous_hash\":\"0d0369245660c50fa85f1dd348493c76344932042ab32d5b9b0fd40e8b25e83e\",\"timestamp\":\"2026-09-04T16:23:58.095Z\"}"
+      "{\"action\":\"issue_template\",\"agent\":\"01a06d89-29d4-7563-a858-a0d2e6da13c8\",\"detail\":\"template attested and issued by the Registry\",\"outcome\":\"ALLOWED\",\"previous_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"timestamp\":\"2026-09-04T17:48:20.818Z\"}",
+      "{\"action\":\"policy_update\",\"agent\":\"01a06d89-29d4-7563-a858-a0d2e6da13c8\",\"detail\":\"dual-signed policy in force, version 1\",\"outcome\":\"ALLOWED\",\"previous_hash\":\"a8348dc1f75ee6368e1269e02b19a1a9af2aa70a609654236ff8f81a243e7ca4\",\"timestamp\":\"2026-09-04T17:48:20.818Z\"}",
+      "{\"child_template_id\":\"01a06d89-29d4-7a37-ac00-03aec37b35c3\",\"granted_scopes\":[\"read:events\"],\"outcome\":\"ALLOWED\",\"previous_hash\":\"2dffa26ac3dbb5ca7063ff8549816a839d2a4e76559f91c67363d67ba3d75b48\",\"requested_scopes\":[\"read:events\"],\"spawn_nonce\":\"1pJQJTnbMT9zVP4bThugcQ==\",\"spawning_agent_id\":\"01a06d89-29d4-7563-a858-a0d2e6da13c8\",\"timestamp\":\"2026-09-04T17:48:20.818Z\"}",
+      "{\"action\":\"policy_update\",\"agent\":\"01a06d89-29d4-7a37-ac00-03aec37b35c3\",\"detail\":\"dual-signed policy in force, version 1\",\"outcome\":\"ALLOWED\",\"previous_hash\":\"e4ca60d5487f47d54d2051bb543776c9a02e7d844696d2b38255c750c7e7218d\",\"timestamp\":\"2026-09-04T17:48:20.818Z\"}"
     ]
   },
   "expected": {

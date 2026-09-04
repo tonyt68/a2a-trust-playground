@@ -41,6 +41,6 @@ carried as PEM strings inside the JSON. Both profile extensions are critical, so
 `openssl verify` refuses every agent certificate here — by design (§8.2) — and
 `openssl verify -ignore_critical` accepts them.
 
-Generated 2026-09-04T16:24:28.095Z. Regenerate with `node scripts/gen-vectors.mjs`;
+Generated 2026-09-04T17:48:20.818Z. Regenerate with `node scripts/gen-vectors.mjs`;
 every run mints fresh keys, so the files change on every run and are checked in
 as a snapshot, not as a fixed point.

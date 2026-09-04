@@ -63,7 +63,8 @@ template_json () { # $1 subject, $2 scopes json, $3 can_spawn json, $4 max_child
   printf '{"subject":"%s","owner":"owner-authority","org_id":"fixture-org","permitted_operations":["spawn","read"],"allowed_scopes":%s,"can_spawn":%s,"max_children":%s,"policy_ref":"policy-store/%s/current","ttl_seconds":%s}' \
     "$1" "$2" "$3" "$4" "$1" "$5"
 }
-TEMPLATE_A=$(jcs_hex "$(template_json "$AGENT_A" '["read:events","write:events"]' "[\"$AGENT_B\"]" 2 86400)")
+# §8.1 — max_children never exceeds the children can_spawn names: one here.
+TEMPLATE_A=$(jcs_hex "$(template_json "$AGENT_A" '["read:events","write:events"]' "[\"$AGENT_B\"]" 1 86400)")
 TEMPLATE_B=$(jcs_hex "$(template_json "$AGENT_B" '["read:events"]' '[]' 0 86400)")
 SPAWN_B=$(jcs_hex "{\"parent_agent_id\":\"$AGENT_A\",\"spawned_at\":\"$SPAWNED_AT\",\"spawn_nonce\":\"$NONCE\"}")
 # The same object with whitespace: valid JSON, not valid JCS.

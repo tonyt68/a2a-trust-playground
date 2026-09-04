@@ -80,8 +80,8 @@ describe('the -03 field sets', () => {
     expect(POLICY_FIELDS).toContain('version');
     expect(POLICY_FIELDS).toContain('subject');
   });
-  it('the grant is exactly §13.2 Table 10, with no signature row', () => {
-    expect([...GRANT_FIELDS].sort()).toEqual(['allowed_scopes', 'grantee', 'grantor', 'issued_at',
+  it('the grant is exactly §13.2 Table 11, grant_id included, with no signature row', () => {
+    expect([...GRANT_FIELDS].sort()).toEqual(['allowed_scopes', 'grant_id', 'grantee', 'grantor', 'issued_at',
       'max_spawns', 'template', 'ttl_seconds']);
     expect(GRANT_FIELDS).not.toContain('signature');
   });

@@ -17,7 +17,7 @@
       </address>
     </author>
 
-    <date month="September" day="3" year="2026"/>
+    <date month="September" day="4" year="2026"/>
 
     <area>Security</area>
 
@@ -81,8 +81,9 @@
       <t>Every document defined by this specification -- the Agent Template
       extension of <xref target="static-field-encoding"/>, the Agent Spawn
       extension of <xref target="spawn-provenance"/>, the dynamic policy
-      document of <xref target="policy-document-structure"/>, and the
-      cross-organizational grant of <xref target="grant-structure"/> -- is a
+      document of <xref target="policy-document-structure"/>, the
+      cross-organizational grant of <xref target="grant-structure"/>, and the
+      audit log entry of <xref target="audit-requirements"/> -- is a
       JSON object serialized using the JSON Canonicalization Scheme (JCS)
       <xref target="RFC8785"/>.</t>
 
@@ -93,9 +94,18 @@
       <bcp14>MUST NOT</bcp14> apply case folding, Unicode normalization, or any
       other transformation before comparison.</t>
 
+      <t>The same rule governs every string value this document compares for
+      equality: an agent identifier, an Owner, an OrgID, a Grantor or Grantee,
+      a scope, a nonce, an outcome.  Two values are equal when their octets are
+      identical, and a relying party <bcp14>MUST NOT</bcp14> apply case
+      folding, Unicode normalization, trimming, or any other transformation to
+      either before comparing them.  Where a later section restates this for
+      one value, it does so for emphasis, not because the rule differs
+      there.</t>
+
       <t>A JSON object carried under this specification <bcp14>MUST NOT</bcp14>
-      contain a duplicate member name, which <xref target="RFC8785"/> also
-      requires of any input to JCS.  A relying party <bcp14>MUST</bcp14> detect
+      contain a duplicate member name, which <xref target="RFC8785"/>,
+      Section 3.1, also requires of any input to JCS.  A relying party <bcp14>MUST</bcp14> detect
       a duplicate and refuse the document.  This is a requirement on the
       parser, not only on the document: JSON syntax permits duplicates, and a
       parser that silently keeps the first or the last occurrence does not
@@ -135,7 +145,7 @@
             <tr><td>body</td><td>object</td><td>The signed document: a template, a policy, or a grant</td></tr>
             <tr><td>owner_sig</td><td>string</td><td>Signature by the template Owner</td></tr>
             <tr><td>pa_sig</td><td>string</td><td>Signature by the Policy Authority</td></tr>
-            <tr><td>content_hash</td><td>string</td><td>SHA-256 digest of the signed octets, lowercase hexadecimal.  REQUIRED where <xref target="signature-coverage"/> requires a content hash; otherwise absent</td></tr>
+            <tr><td>content_hash</td><td>string</td><td>SHA-256 digest of the signed octets, lowercase hexadecimal.  REQUIRED in the envelope of a dynamic policy document; MUST be absent from the envelope of a template or a grant (<xref target="signature-coverage"/>)</td></tr>
           </tbody>
         </table>
 
@@ -221,6 +231,7 @@
             <tr><td>Grantee</td><td>grantee</td><td>Section <xref target="grant-structure" format="counter"/></td></tr>
             <tr><td>Template</td><td>template</td><td>Section <xref target="grant-structure" format="counter"/></td></tr>
             <tr><td>MaxSpawns</td><td>max_spawns</td><td>Section <xref target="grant-structure" format="counter"/></td></tr>
+            <tr><td>GrantID</td><td>grant_id</td><td>Sections <xref target="grant-structure" format="counter"/>, <xref target="spawn-provenance" format="counter"/></td></tr>
             <tr><td>ParentAgentID</td><td>parent_agent_id</td><td>Section <xref target="spawn-provenance" format="counter"/></td></tr>
             <tr><td>SpawnedAt</td><td>spawned_at</td><td>Section <xref target="spawn-provenance" format="counter"/></td></tr>
             <tr><td>SpawnNonce</td><td>spawn_nonce</td><td>Section <xref target="spawn-provenance" format="counter"/></td></tr>
@@ -253,6 +264,11 @@
         <dd>The party responsible for a template, identified by the
         template's Owner field and holding the private key of the Owner
         certificate described in <xref target="template-dual-signature"/>.</dd>
+
+        <dt>Orchestrator:</dt>
+        <dd>An agent that spawns other agents.  The figures in this document
+        use the bare term for any such agent; the Root Orchestrator is the
+        one with no parent.</dd>
 
         <dt>Root Orchestrator:</dt>
         <dd>An agent that has no parent.  Its certificate carries no Agent
@@ -406,7 +422,18 @@
           <li>The serialNumber <bcp14>MUST</bcp14> contain at least 64 bits
           of output from a cryptographically secure random number generator.
           A predictable serial number is an input an attacker controls when
-          searching for a digest collision over a certificate.</li>
+          searching for a digest collision over a certificate.  The value is
+          an ASN.1 INTEGER, which <xref target="RFC5280"/> requires to be
+          positive, at most 20 octets, and in minimal DER form.  An
+          implementation that clears the top bit of the first random octet to
+          keep the value positive discards a bit of entropy and, one draw in
+          256, produces a leading zero octet followed by an octet below 0x80
+          -- a non-minimal encoding that a strict parser refuses.  Draw the
+          random octets, at most 19 so that a prepended octet stays within
+          the limit; strip any leading zero octets; and prepend a single zero
+          octet only when the first remaining octet has its top bit set.  The
+          result is positive, minimal, and carries every bit it was
+          given.</li>
         </ul>
         <t>An agent certificate asserting cA = TRUE is a certificate entitled to
         issue further certificates.  Such an agent can create children without
@@ -462,16 +489,24 @@
           <artwork type="ascii-art"><![CDATA[
    Template Author
        | defines template (scopes, spawn rules, TTL, owner)
-       | generates CSR
        v
-   Template Registry CA
-       | validates template conformance
+   Conformance gate (Section 9.1)
+       | every REQUIRED field present and non-null
+       v
+   Dual attestation (Section 9.2)
+       | Owner signs; Policy Authority countersigns
+       | the same JCS octets
+       v
+   CSR carrying the attested template
+       v
+   Template Registry CA (Section 9.3)
+       | re-applies the gate, re-verifies both signatures
        | signs the template certificate
        v
    Signed Agent Template (registered)
        |
        v
-   Orchestrator spawns agent from signed template
+   Orchestrator spawns agent from signed template (Section 10)
        | agent receives a certificate the CA issues from it
        | CA chain proves provenance
        v
@@ -498,9 +533,9 @@
        |      Agent Template extension (Section 8.2):
        |        subject: 9f3c...  (equals Subject CN, 9.3)
        |        owner, org_id
-       |        permitted_operations: [spawn, delegate]
+       |        permitted_operations: [spawn]
        |        allowed_scopes:       [read:data, write:data]
-       |        can_spawn: [2b7e...], max_children: 5
+       |        can_spawn: [2b7e...], max_children: 1
        |        policy_ref, ttl_seconds: 3600
        |
        +--> Child Agent Certificate
@@ -513,6 +548,7 @@
               Agent Spawn extension (Section 10.5):
                 parent_agent_id: 9f3c...
                 spawned_at, spawn_nonce
+                grant_id  (only when spawned under a grant, 13.2)
 
    An agent certificate never issues a certificate (Section 7.1).
    The parent-child link is recorded in the child's Agent Spawn
@@ -536,7 +572,6 @@
           </thead>
           <tbody>
             <tr><td>Subject</td><td>REQUIRED</td><td>Unique template identifier</td></tr>
-            <tr><td>Issuer</td><td>REQUIRED</td><td>Template Registry CA</td></tr>
             <tr><td>Owner</td><td>REQUIRED</td><td>Verified identity of template owner</td></tr>
             <tr><td>OrgID</td><td>REQUIRED</td><td>CA-validated organization identifier</td></tr>
             <tr><td>PermittedOperations</td><td>REQUIRED</td><td>Operations this agent may perform</td></tr>
@@ -557,6 +592,21 @@
         conformance gate of <xref target="template-conformance-gate"/>
         <bcp14>SHOULD</bcp14> refuse it, and a Registry <bcp14>MUST</bcp14>
         refuse a spawn request from it.</t>
+        <t>A template defines exactly one agent
+        (<xref target="terminology"/>), so each entry of CanSpawn names a
+        child that can exist at most once at a time, and MaxChildren counts
+        named children rather than instances of one.  MaxChildren
+        <bcp14>MUST NOT</bcp14> exceed the number of entries in CanSpawn.  The
+        conformance gate of <xref target="template-conformance-gate"/>
+        <bcp14>MUST</bcp14> refuse a template that violates this, and a
+        relying party <bcp14>MUST</bcp14> refuse a certificate whose extension
+        does.  A cap above the number of children a template can name is a
+        cap on nothing, and a validator reading it would count toward a limit
+        that can never be reached.</t>
+        <t>The certificate's issuer is not a template field.  It is set by the
+        Template Registry CA at issuance (<xref target="template-issuance"/>)
+        and read from the certificate (<xref target="static-field-encoding"/>);
+        a template carries no member for it.</t>
       </section>
 
       <section anchor="static-field-encoding" numbered="true" toc="default">
@@ -612,11 +662,11 @@
         duration whose unit is inferred is a duration two implementations will
         infer differently.</t>
 
-        <t>The Issuer field of <xref target="static-fields"/> has no member in
-        this extension.  X.509 already carries the issuer, and a second copy
-        inside an extension the issuer signs could disagree with the copy the
-        relying party validated the signature against.  A relying party
-        <bcp14>MUST</bcp14> take the issuer from the certificate.</t>
+        <t>The certificate's issuer has no member in this extension.  X.509
+        already carries the issuer, and a second copy inside an extension the
+        issuer signs could disagree with the copy the relying party validated
+        the signature against.  A relying party <bcp14>MUST</bcp14> take the
+        issuer from the certificate.</t>
 
         <t>A certificate <bcp14>MUST NOT</bcp14> carry more than one Agent
         Template extension, and a relying party <bcp14>MUST</bcp14> refuse a
@@ -626,7 +676,14 @@
 
         <t>A relying party <bcp14>MUST</bcp14> impose a limit on the size of the
         extension before parsing it, and <bcp14>MUST</bcp14> refuse an extension
-        exceeding that limit rather than attempting a partial parse.  The
+        exceeding that limit rather than attempting a partial parse.  The limit
+        is 16384 octets of extnValue for the Agent Template extension and 1024
+        octets for the Agent Spawn extension of
+        <xref target="spawn-provenance"/>.  The first holds two hundred scopes
+        at the maximum length of <xref target="scope-constraint"/>, which is
+        more than any template this document contemplates; the second holds
+        every member of a fixed-shape object with room to spare; and neither
+        is large enough to be worth handing to a parser unverified.  The
         extension arrives inside a certificate presented by the party whose
         authority it describes; it is attacker-controlled input up to the point
         the issuer's signature has been verified, and that signature covers
@@ -784,14 +841,20 @@
         <name>Two-Check Spawn Rule</name>
         <t>Every spawn <bcp14>MUST</bcp14> pass two independent checks.  Either check
         failing <bcp14>MUST</bcp14> result in spawn denial with no fallback.  The Template Registry performs both checks, as
-        <xref target="spawn-validation-sequence"/> specifies.</t>
+        <xref target="spawn-validation-sequence"/> specifies.  That section
+        lists the individual conditions in the order they are evaluated; this
+        section states which check each condition belongs to, and an
+        implementation <bcp14>MUST</bcp14> evaluate every condition of both.</t>
 
         <t>Check 1 -- Static (from the spawning agent's certificate): The
         spawning agent's PermittedOperations <bcp14>MUST</bcp14> include
-        spawn, and the requested child template <bcp14>MUST</bcp14> appear in
-        the spawning agent's CanSpawn list.  Both are read from the Agent
-        Template extension of the spawning agent's certificate, never from a
-        document the agent supplies.</t>
+        spawn, the requested child template <bcp14>MUST</bcp14> appear in
+        the spawning agent's CanSpawn list, and the requested scopes
+        <bcp14>MUST</bcp14> be a subset of the spawning agent's AllowedScopes
+        (<xref target="scope-constraint"/>).  All three are read from the
+        Agent Template extension of the spawning agent's certificate, never
+        from a document the agent supplies.  These are steps 1 and 4 of
+        <xref target="spawn-validation-sequence"/>.</t>
 
         <t>Check 2 -- Dynamic (Registry live lookup):
         The requested child template <bcp14>MUST</bcp14> be currently registered,
@@ -799,62 +862,96 @@
         DISABLED under <xref target="template-lifecycle"/>, and owned either
         by the spawning agent's organization or by an organization that has
         issued a grant under <xref target="cross-org-interaction"/> naming the
-        spawning agent's organization as Grantee.</t>
+        spawning agent's organization as Grantee.  The child template
+        <bcp14>MUST</bcp14> also appear in the SpawnTargets of the dynamic
+        policy currently in force for the spawning agent
+        (<xref target="policy-document-structure"/>), which the Registry
+        retrieves through the PolicyRef of the spawning agent's certificate
+        and never accepts from the agent; a policy with no SpawnTargets grants
+        none, and an agent with no policy in force may not spawn.  Finally the
+        spawning agent's live child count <bcp14>MUST</bcp14> be below its
+        MaxChildren.  These are steps 2, 3 and 5 of
+        <xref target="spawn-validation-sequence"/>.</t>
 
         <t>Rationale: CanSpawn alone is insufficient because the certificate
         may be stale and a template may have been revoked since issuance.
         Registry lookup alone is insufficient because any party could
-        forge a request claiming any template.  Both checks <bcp14>MUST</bcp14> pass.</t>
+        forge a request claiming any template.  The policy condition is what
+        gives the fast lane of <xref target="two-lane-model"/> authority over
+        spawning: CanSpawn is the ceiling the certificate sets, SpawnTargets is
+        what the Owner has currently authorized within it, and a spawn target
+        can therefore be withdrawn by a policy change without
+        re-certification.  Both checks <bcp14>MUST</bcp14> pass.</t>
       </section>
 
       <section anchor="spawn-validation-sequence" numbered="true" toc="default">
         <name>Spawn Validation Sequence</name>
         <figure>
           <artwork type="ascii-art"><![CDATA[
-   1.  CanSpawn check -- child template in CanSpawn list?
+   1.  CanSpawn check -- spawn in PermittedOperations, and
+       child template in CanSpawn list?
        NO  --> DENY, audit log
        YES --> continue
 
-   2.  Registry check -- registered, CA-signed, not revoked?
+   2.  Registry check -- child template registered, CA-signed,
+       not revoked, not DISABLED, and owned by the spawning
+       agent's organization or granted to it?
        NO  --> DENY, audit log
        YES --> continue
 
-   3.  Scope check -- requested scope subset of parent scopes?
+   3.  Policy check -- child template in the SpawnTargets of
+       the policy in force for the spawning agent?
        NO  --> DENY, audit log
        YES --> continue
 
-   4.  MaxChildren check -- current children < MaxChildren?
+   4.  Scope check -- requested scope subset of parent scopes?
+       NO  --> DENY, audit log
+       YES --> continue
+
+   5.  MaxChildren check -- current children < MaxChildren, and
+       no live certificate for the child template already?
        NO  --> DENY, audit log
        YES --> spawn approved
 
-   5.  Template Registry CA issues the child certificate with:
+   6.  Template Registry CA issues the child certificate with:
        - parent identity embedded (delegation chain)
        - scope equal to requested scope (not exceeding parent)
        - spawn timestamp and nonce (replay prevention)
+       - grant identifier, when spawned under a grant
        - audit log entry written
           ]]></artwork>
         </figure>
-        <t>The count compared against MaxChildren in step 4 is held by the
+        <t>The count compared against MaxChildren in step 5 is held by the
         Template Registry, which is the only party that observes every spawn
         under a template.  The Registry <bcp14>MUST</bcp14> perform that
         comparison as part of Check 2 of <xref target="two-check-rule"/>,
         atomically with recording the new child, so that two concurrent spawn
         requests cannot both observe a count one below the limit and both
-        succeed.  A relying party validating a chain document counts only the
-        children that document names, and <bcp14>MUST</bcp14> refuse a document
-        in which that count exceeds the parent's MaxChildren; that is a
-        consistency check on the document, not the enforcement of the cap, and
-        an implementation <bcp14>MUST NOT</bcp14> present it as such.</t>
+        succeed.  The second condition of step 5 follows from
+        <xref target="full-re-verification"/>: a template defines one agent,
+        one identity never holds two valid certificates, and the Registry
+        <bcp14>MUST</bcp14> therefore refuse to spawn a child whose template
+        already has an unexpired, unrevoked certificate.  A relying party
+        validating a chain document counts only the children that document
+        names, and <bcp14>MUST</bcp14> refuse a document in which that count
+        exceeds the parent's MaxChildren; that is a consistency check on the
+        document, not the enforcement of the cap, and an implementation
+        <bcp14>MUST NOT</bcp14> present it as such.</t>
 
-        <t>The Template Registry CA performs steps 1 through 4 and issues the
-        certificate in step 5.  The spawning agent presents a spawn request --
+        <t>The Template Registry CA performs steps 1 through 5 and issues the
+        certificate in step 6.  The spawning agent presents a spawn request --
         the child template's subject, the requested scopes, a timestamp, and a
         nonce per <xref target="replay-attacks"/> -- and receives the issued
         certificate; it signs nothing, because
         <xref target="certificate-profile"/> forbids an agent certificate from
-        issuing.  Steps 1 and 3 are evaluated against the spawning agent's own
+        issuing.  Steps 1 and 4 are evaluated against the spawning agent's own
         Agent Template extension, which the Registry reads from the
-        certificate it presented.</t>
+        certificate it presented.  Step 3 is evaluated against the policy in
+        force for the spawning agent, which the Registry retrieves through the
+        PolicyRef of that extension; a policy the agent supplies with its
+        request <bcp14>MUST NOT</bcp14> be consulted.  If the policy store
+        cannot be reached, or no policy is in force, the request is refused
+        under <xref target="fail-closed"/>.</t>
       </section>
 
       <section anchor="scope-constraint" numbered="true" toc="default">
@@ -926,9 +1023,34 @@
 
       <section anchor="audit-requirements" numbered="true" toc="default">
         <name>Audit Requirements</name>
-        <t>Every spawn event <bcp14>MUST</bcp14> be logged with: spawning agent identity,
-        child template identity, requested scope, granted scope,
-        timestamp, outcome (ALLOWED or DENIED), and reason if denied.</t>
+        <t>Every spawn event, accepted or refused, <bcp14>MUST</bcp14> be
+        recorded as an audit log entry: a JSON object carrying exactly the
+        following members, subject to the presence rules the table states,
+        serialized as <xref target="document-encoding"/> requires and hashed
+        as <xref target="audit-integrity"/> requires.  The entry has no
+        display names; wire names are given directly.</t>
+        <table anchor="audit-entry-members">
+          <name>Audit Log Entry Members</name>
+          <thead>
+            <tr><th>Member</th><th>Type</th><th>Content</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>spawning_agent_id</td><td>string</td><td>Identifier of the spawning agent, in the form of <xref target="identity-binding"/></td></tr>
+            <tr><td>child_template_id</td><td>string</td><td>Subject of the requested child template, in the same form</td></tr>
+            <tr><td>requested_scopes</td><td>array of string</td><td>The scopes the request asked for</td></tr>
+            <tr><td>granted_scopes</td><td>array of string</td><td>The scopes issued; empty when outcome is DENIED</td></tr>
+            <tr><td>spawn_nonce</td><td>string</td><td>The nonce of the request, per <xref target="replay-attacks"/></td></tr>
+            <tr><td>grant_id</td><td>string</td><td>The GrantID of <xref target="grant-structure"/> when the spawn was requested under a grant; MUST be absent otherwise</td></tr>
+            <tr><td>timestamp</td><td>string</td><td>The instant the Registry recorded the outcome, per <xref target="RFC3339"/>, in UTC</td></tr>
+            <tr><td>outcome</td><td>string</td><td>ALLOWED or DENIED, exactly</td></tr>
+            <tr><td>reason</td><td>string</td><td>The step of <xref target="spawn-validation-sequence"/> that refused the request, and why; REQUIRED when outcome is DENIED, MUST be absent otherwise</td></tr>
+            <tr><td>previous_hash</td><td>string</td><td>The entry_hash of the preceding entry, lowercase hexadecimal; sixty-four zero digits for the first entry of a log</td></tr>
+            <tr><td>entry_hash</td><td>string</td><td>SHA-256 over the canonical form of every other member of this entry, lowercase hexadecimal, per <xref target="audit-integrity"/></td></tr>
+          </tbody>
+        </table>
+        <t>A refused request is recorded for the same reason an accepted one
+        is: a sequence of refusals is the evidence of an attempt, and a log
+        that records only successes cannot show one.</t>
       </section>
 
       <section anchor="spawn-provenance" numbered="true" toc="default">
@@ -955,11 +1077,16 @@
             <tr><td>parent_agent_id</td><td>string</td><td>The parent's identifier, in the form required by <xref target="identity-binding"/></td></tr>
             <tr><td>spawned_at</td><td>string</td><td>The instant of issuance, per <xref target="RFC3339"/>, in UTC</td></tr>
             <tr><td>spawn_nonce</td><td>string</td><td>The nonce of the spawn request, per <xref target="replay-attacks"/></td></tr>
+            <tr><td>grant_id</td><td>string</td><td>The GrantID of the grant under which the spawn was authorized (<xref target="grant-structure"/>); REQUIRED when the child template is owned by an organization other than the spawning agent's, MUST be absent otherwise</td></tr>
           </tbody>
         </table>
 
-        <t>All three members are <bcp14>REQUIRED</bcp14> when the extension is
-        present.  A certificate for an agent that has a parent
+        <t>parent_agent_id, spawned_at and spawn_nonce are
+        <bcp14>REQUIRED</bcp14> when the extension is present; grant_id is
+        present exactly when the spawn was cross-organizational, and a relying
+        party <bcp14>MUST</bcp14> refuse a certificate that carries it for a
+        child owned by the parent's own organization or omits it for one that
+        is not.  A certificate for an agent that has a parent
         <bcp14>MUST</bcp14> carry the extension; a certificate for an agent that
         has none -- a root orchestrator -- <bcp14>MUST NOT</bcp14>.  A relying
         party validating a chain <bcp14>MUST</bcp14> refuse a certificate whose
@@ -1002,8 +1129,22 @@
         a second old, and its currency is governed by its validity period and
         its revocation state, not by when it was requested.  A relying party
         <bcp14>MUST</bcp14>, however, refuse a chain in which two certificates
-        carry the same spawn_nonce, since the Registry issues each nonce
-        once.</t>
+        carry the same spawn_nonce.  That is a consistency check on the
+        document, in the sense <xref target="spawn-validation-sequence"/> gives
+        the term: what makes a nonce unique across every chain the Registry
+        ever issues is that the Registry accepts each nonce once, under
+        <xref target="replay-attacks"/>, and a relying party holding one chain
+        cannot observe another.  An implementation <bcp14>MUST NOT</bcp14>
+        present the document-local check as the enforcement of
+        uniqueness.</t>
+
+        <t>grant_id is what makes <xref target="unilateral-revocation"/>
+        enforceable.  A grant can be revoked by its Grantor alone, and every
+        certificate issued under it must then become untrusted; without a
+        member naming the grant, nothing identifies those certificates.  With
+        it, the Registry that issued them can revoke them, and a relying party
+        in either organization learns of it through the revocation state the
+        certificate already points to.</t>
       </section>
     </section>
 
@@ -1067,17 +1208,17 @@
         <table anchor="policy-fields">
           <name>Dynamic Policy Document Fields</name>
           <thead>
-            <tr><th>Field</th><th>Required</th><th>Description</th></tr>
+            <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
           </thead>
           <tbody>
-            <tr><td>Subject</td><td>REQUIRED</td><td>Identifier of the agent this policy governs; MUST match the Subject of the template certificate</td></tr>
-            <tr><td>Owner</td><td>REQUIRED</td><td>Submitting owner; MUST match Owner in the template certificate</td></tr>
-            <tr><td>OrgID</td><td>REQUIRED</td><td>Submitting organization; MUST match OrgID in the template certificate</td></tr>
-            <tr><td>Scopes</td><td>REQUIRED</td><td>Scopes granted by this policy; bounded by AllowedScopes</td></tr>
-            <tr><td>SpawnTargets</td><td>OPTIONAL</td><td>Spawn targets granted by this policy; bounded by CanSpawn. Absent means none are granted</td></tr>
-            <tr><td>Version</td><td>REQUIRED</td><td>Monotonically increasing integer, scoped to Subject</td></tr>
-            <tr><td>IssuedAt</td><td>REQUIRED</td><td>Timestamp of issuance, per <xref target="RFC3339"/></td></tr>
-            <tr><td>NotAfter</td><td>OPTIONAL</td><td>Expiry of this policy; MUST NOT be later than the notAfter of the certificate the policy governs.  Absent means equal to it</td></tr>
+            <tr><td>Subject</td><td>string</td><td>REQUIRED</td><td>Identifier of the agent this policy governs; MUST match the Subject of the template certificate</td></tr>
+            <tr><td>Owner</td><td>string</td><td>REQUIRED</td><td>Submitting owner; MUST match Owner in the template certificate</td></tr>
+            <tr><td>OrgID</td><td>string</td><td>REQUIRED</td><td>Submitting organization; MUST match OrgID in the template certificate</td></tr>
+            <tr><td>Scopes</td><td>array of string</td><td>REQUIRED</td><td>Scopes granted by this policy; bounded by AllowedScopes</td></tr>
+            <tr><td>SpawnTargets</td><td>array of string</td><td>OPTIONAL</td><td>Spawn targets granted by this policy, each a template Subject in the form of <xref target="identity-binding"/>; bounded by CanSpawn.  Absent means none are granted, and a spawn request is then refused at step 3 of <xref target="spawn-validation-sequence"/></td></tr>
+            <tr><td>Version</td><td>integer</td><td>REQUIRED</td><td>Monotonically increasing integer, scoped to Subject</td></tr>
+            <tr><td>IssuedAt</td><td>string</td><td>REQUIRED</td><td>Timestamp of issuance, per <xref target="RFC3339"/></td></tr>
+            <tr><td>NotAfter</td><td>string</td><td>OPTIONAL</td><td>Expiry of this policy, per <xref target="RFC3339"/>; MUST NOT be later than the notAfter of the certificate the policy governs.  Absent means equal to it</td></tr>
           </tbody>
         </table>
         <t>Version is scoped to the Subject, not global.  A relying party
@@ -1135,9 +1276,16 @@
         current.  The same reasoning applies to Subject: a signature that does
         not bind the policy to the agent it governs permits a policy issued for
         one agent to be presented for another.</t>
-        <t>The content hash required by <xref target="policy-change-sequence"/>
-        <bcp14>MUST</bcp14> be SHA-256, or a stronger digest, computed over the
-        same canonical form and the same field set as the signatures.  The hash
+        <t>The content hash is a member of the envelope of a dynamic policy
+        document only.  It is <bcp14>REQUIRED</bcp14> there, because step 4 of
+        <xref target="policy-change-sequence"/> stores the policy and step 5
+        re-reads it, and a stored document wants an integrity value that is
+        cheaper to check than two signatures; it <bcp14>MUST</bcp14> be absent
+        from the envelope of a template or a grant, which are verified on
+        presentation and whose signatures already cover the same octets.  The
+        content hash <bcp14>MUST</bcp14> be SHA-256, or a stronger digest,
+        computed over the same canonical form and the same field set as the
+        signatures.  The hash
         field itself is stored alongside the policy document and
         <bcp14>MUST NOT</bcp14> be included in its own preimage.  The content
         hash is a derived value: a relying party <bcp14>MUST</bcp14> recompute
@@ -1231,6 +1379,8 @@
             <tr><td>Mismatched identity</td><td>A chain names one agent and presents a certificate issued to another; both validate on their own terms</td><td>Every restatement must equal the subject CN (<xref target="identity-binding"/>)</td></tr>
             <tr><td>Silent parser disagreement</td><td>Two parsers keep different duplicates of a key and both report success</td><td>Duplicate detection is a parser requirement (<xref target="document-encoding"/>)</td></tr>
             <tr><td>Unlocatable revocation</td><td>Revocation must be consulted but the certificate does not say where</td><td>cRLDistributionPoints or OCSP is required (<xref target="revocation-discovery"/>)</td></tr>
+            <tr><td>Spawn under a revoked grant</td><td>A grant is revoked and nothing identifies the certificates issued under it</td><td>grant_id in the Agent Spawn extension; the issuing Registry revokes them (<xref target="unilateral-revocation"/>)</td></tr>
+            <tr><td>Spawn the policy withdrew</td><td>A policy grants no spawn targets and the agent spawns everything its certificate's CanSpawn allows</td><td>SpawnTargets is a step of the spawn sequence (<xref target="spawn-validation-sequence"/>)</td></tr>
           </tbody>
         </table>
       </section>
@@ -1326,6 +1476,7 @@
             <tr><th>Field</th><th>Type</th><th>Description</th></tr>
           </thead>
           <tbody>
+            <tr><td>GrantID</td><td>string</td><td>Identifier of this grant: a UUID in the form of <xref target="identity-binding"/>, unique among the grants the Grantor has issued</td></tr>
             <tr><td>Grantor</td><td>string</td><td>OrgID of the resource-owning organization</td></tr>
             <tr><td>Grantee</td><td>string</td><td>OrgID of the requesting organization</td></tr>
             <tr><td>Template</td><td>string</td><td>Subject of the template granted, in the form of <xref target="identity-binding"/></td></tr>
@@ -1379,7 +1530,16 @@
         <t>The granting organization <bcp14>MAY</bcp14> revoke a cross-organizational grant
         without the cooperation of the receiving organization.  Upon
         revocation, all agents spawned under the affected grant <bcp14>MUST</bcp14> be
-        treated as untrusted on next validation.</t>
+        treated as untrusted on next validation.  The Grantor's Registry
+        issued every such certificate, and each carries the grant's GrantID in
+        its Agent Spawn extension (<xref target="spawn-provenance"/>).  On
+        revoking a grant the Registry <bcp14>MUST</bcp14> revoke, under
+        <xref target="revocation"/>, every unexpired certificate whose
+        grant_id names it, and <bcp14>MUST</bcp14> refuse further spawn
+        requests under it.  A relying party in either organization then learns
+        of the revocation through the revocation state the certificate itself
+        points to (<xref target="revocation-discovery"/>), and needs no
+        channel to the Grantor beyond that.</t>
       </section>
 
       <section anchor="federated-audit" numbered="true" toc="default">
@@ -1446,6 +1606,7 @@
           <li>Registry unreachable</li>
           <li>CRL unreachable</li>
           <li>Certificate expired or revoked</li>
+          <li>Policy store unreachable, or no policy in force</li>
           <li>Scope escalation attempt</li>
           <li>Policy invalid or unsigned</li>
           <li>Dual signature missing or invalid</li>
@@ -1463,8 +1624,11 @@
         <name>Field Placement</name>
         <t>Implementations <bcp14>MUST</bcp14> place every field in the location specified
         by this document: <xref target="document-encoding"/>,
-        <xref target="static-field-encoding"/>, and
-        <xref target="spawn-provenance"/>.  Variable placement is not
+        <xref target="static-field-encoding"/>,
+        <xref target="spawn-provenance"/>,
+        <xref target="policy-document-structure"/>,
+        <xref target="grant-structure"/>, and
+        <xref target="audit-requirements"/>.  Variable placement is not
         permitted.</t>
       </section>
 
@@ -1647,13 +1811,26 @@
 
       <section anchor="replay-attacks" numbered="true" toc="default">
         <name>Replay Attacks</name>
-        <t>A spawn request <bcp14>MUST</bcp14> carry a timestamp and a nonce.
+        <t>A spawn request <bcp14>MUST</bcp14> carry a timestamp and a nonce,
+        both generated by the spawning agent.
         The timestamp <bcp14>MUST</bcp14> be an <xref target="RFC3339"/> instant
         in UTC.  The nonce <bcp14>MUST</bcp14> be at least 128 bits of output
         from a cryptographically secure random number generator, encoded as
         base64 <xref target="RFC4648"/>.  The nonce and timestamp of an accepted
         request are recorded in the child's Agent Spawn extension
-        (<xref target="spawn-provenance"/>).</t>
+        (<xref target="spawn-provenance"/>); those of every request, accepted
+        or refused, are recorded in the audit log entry of
+        <xref target="audit-requirements"/>.</t>
+        <t>The Registry is the relying party for a spawn request.  It
+        <bcp14>MUST</bcp14> record the nonce when the request carrying it is
+        received, before any step of <xref target="spawn-validation-sequence"/>
+        is evaluated, and <bcp14>MUST</bcp14> refuse a later request carrying
+        the same nonce whatever became of the first.  A nonce is spent by being
+        presented, not by being accepted: a request refused at any step has
+        consumed its nonce, and a retry <bcp14>MUST</bcp14> carry a fresh one.
+        Recording only accepted nonces would let a refused request be replayed
+        until something changed and it was accepted, and a fresh nonce costs
+        nothing to generate.</t>
         <t>A relying party <bcp14>MUST</bcp14> refuse a spawn request whose
         timestamp is more than 60 seconds from the relying party's own clock in
         either direction, and <bcp14>MUST</bcp14> refuse a request whose nonce it
@@ -1745,10 +1922,11 @@
         <t>Audit logs <bcp14>MUST</bcp14> be tamper-evident.  Logs <bcp14>MUST NOT</bcp14> be deletable
         by agents or orchestrators.  Audit log infrastructure <bcp14>SHOULD</bcp14>
         be outside the control of the agent ecosystem itself.</t>
-              <t>Each entry's hash <bcp14>MUST</bcp14> be computed as SHA-256, or a
+        <t>Each entry's hash <bcp14>MUST</bcp14> be computed as SHA-256, or a
         stronger digest, over the canonical form
-        (<xref target="canonicalization"/>) of the entry's fields including the
-        previous entry's hash, and excluding the entry's own hash field.  As with
+        (<xref target="canonicalization"/>) of every member of
+        <xref target="audit-entry-members"/> other than entry_hash -- that is,
+        including previous_hash and excluding the entry's own hash.  As with
         policy documents, an unspecified preimage is not a detail: two
         implementations hashing different field sets each read the other's chain
         as broken, and a chain that cannot be verified across implementations
@@ -1786,6 +1964,29 @@
         any other structure, and a relying party that does not recognize a
         key type refuses the signature, which is the fail-closed outcome
         <xref target="fail-closed"/> requires.</t>
+      </section>
+
+      <section anchor="untrusted-input" numbered="true" toc="default">
+        <name>Parsing Untrusted Input</name>
+        <t>Every document this specification defines reaches a relying party
+        from the party whose authority it describes, and is attacker-controlled
+        input until a signature over it has been verified.
+        <xref target="static-field-encoding"/> states this for the two
+        certificate extensions; it applies equally to a signature envelope, a
+        chain document, and a grant.  Three rules of this document exist for
+        that reason and are restated here so that they are read as one
+        defence.  The shape rules of <xref target="document-encoding"/> --
+        flat objects, no duplicate members, exact wire names, a fixed member
+        set -- mean a conforming parser accepts only the shapes this document
+        defines and has nothing else to be confused by.  The size limits of
+        <xref target="static-field-encoding"/> bound what a parser is asked
+        to read.  And the ordering that section requires -- for a certificate,
+        verify the issuer's signature before decoding an extension; for an
+        envelope, verify the signatures over the body octets before acting on
+        any member of body -- means input nobody signed is discarded before it
+        is interpreted.  A relying party that parses first and verifies
+        afterwards has exposed its parser to every party able to present a
+        certificate, which is every party.</t>
       </section>
     </section>
 
@@ -1873,26 +2074,6 @@
           <seriesInfo name="RFC" value="5280"/>
         </reference>
 
-        <reference anchor="RFC6749" target="https://www.rfc-editor.org/info/rfc6749">
-          <front>
-            <title>The OAuth 2.0 Authorization Framework</title>
-            <author initials="D." surname="Hardt" fullname="D. Hardt"/>
-            <date month="October" year="2012"/>
-          </front>
-          <seriesInfo name="RFC" value="6749"/>
-        </reference>
-
-        <reference anchor="RFC8693" target="https://www.rfc-editor.org/info/rfc8693">
-          <front>
-            <title>OAuth 2.0 Token Exchange</title>
-            <author initials="M." surname="Jones" fullname="M. Jones"/>
-            <author initials="A." surname="Campbell" fullname="A. Campbell"/>
-            <author initials="C." surname="Mortimore" fullname="C. Mortimore"/>
-            <date month="January" year="2020"/>
-          </front>
-          <seriesInfo name="RFC" value="8693"/>
-        </reference>
-
         <reference anchor="RFC3339" target="https://www.rfc-editor.org/info/rfc3339">
           <front>
             <title>Date and Time on the Internet: Timestamps</title>
@@ -1974,6 +2155,25 @@
           <seriesInfo name="RFC" value="7942"/>
         </reference>
 
+        <reference anchor="RFC6749" target="https://www.rfc-editor.org/info/rfc6749">
+          <front>
+            <title>The OAuth 2.0 Authorization Framework</title>
+            <author initials="D." surname="Hardt" fullname="D. Hardt"/>
+            <date month="October" year="2012"/>
+          </front>
+          <seriesInfo name="RFC" value="6749"/>
+        </reference>
+
+        <reference anchor="RFC8693" target="https://www.rfc-editor.org/info/rfc8693">
+          <front>
+            <title>OAuth 2.0 Token Exchange</title>
+            <author initials="M." surname="Jones" fullname="M. Jones"/>
+            <author initials="A." surname="Campbell" fullname="A. Campbell"/>
+            <author initials="C." surname="Mortimore" fullname="C. Mortimore"/>
+            <date month="January" year="2020"/>
+          </front>
+          <seriesInfo name="RFC" value="8693"/>
+        </reference>
 
         <reference anchor="NIST800-207">
           <front>
@@ -2143,8 +2343,9 @@
         Stated that a new template version keeps its Subject and revokes
         the prior certificate (<xref target="full-re-verification"/>), that
         DISABLED is a Registry state reported in Check 2 rather than a CRL
-        entry (<xref target="template-lifecycle"/>), and what "authorized
-        party" means in Check 2 (<xref target="two-check-rule"/>).</li>
+        entry (<xref target="template-lifecycle"/>), and which organizations
+        may own a child template under Check 2
+        (<xref target="two-check-rule"/>).</li>
         <li>Replaced the conformance certification requirement, which named
         no certifying body, with a conformance claim
         (<xref target="conformance-certification"/>).  Added Privacy
@@ -2170,10 +2371,59 @@
         Registry was named as the enforcer of MaxSpawns
         (<xref target="grant-structure"/>).</li>
         <li>Replaced the IANA Considerations section, which previously declared
-        no actions.  Encoding the template made a media type and a scope registry
-        necessary.</li>
+        no actions.  Specifying the dynamic policy as a standalone JSON document
+        made a media type necessary, and defining scope syntax made a scope
+        registry possible.</li>
         <li>Promoted the implementation table to a top-level Implementation
         Status section per <xref target="RFC7942"/>.</li>
+        <li>Made the dynamic policy govern spawning
+        (<xref target="two-check-rule"/>,
+        <xref target="spawn-validation-sequence"/>).  The policy document
+        carried a SpawnTargets member that no check consulted, so a policy
+        granting no spawn targets left an agent able to spawn everything its
+        certificate's CanSpawn allowed.  The spawn sequence now has a policy
+        step, and each of its steps is assigned to one of the two checks so
+        that an implementer reading the rule alone builds all of them.</li>
+        <li>Stated who generates the spawn nonce and when it is spent
+        (<xref target="replay-attacks"/>, <xref target="spawn-provenance"/>).
+        The text had the agent supplying the nonce in one place and the
+        Registry issuing it in another.  The agent generates it; the Registry
+        records it on receipt, whether or not the request is then refused; and
+        the document-local uniqueness check is a consistency check rather than
+        the enforcement of uniqueness, which a relying party holding one chain
+        cannot perform.</li>
+        <li>Bounded MaxChildren by the size of CanSpawn
+        (<xref target="static-fields"/>) and required the Registry to refuse a
+        second live certificate for one child template
+        (<xref target="spawn-validation-sequence"/>).  A template defines one
+        agent, so a cap above the number of named children was a cap on
+        nothing, and the example in <xref target="cert-chain-structure"/>
+        showed exactly that.</li>
+        <li>Removed Issuer from the static field table
+        (<xref target="static-fields"/>).  It was REQUIRED there and declared
+        to have no member in the extension two sections later, so the
+        conformance gate demanded a value that could never be supplied.</li>
+        <li>Tied an issued certificate to the grant that authorized it: a grant
+        carries a GrantID (<xref target="grant-structure"/>), a
+        cross-organizational spawn records it in the Agent Spawn extension
+        (<xref target="spawn-provenance"/>), and revoking the grant revokes
+        those certificates (<xref target="unilateral-revocation"/>).  The
+        requirement that agents spawned under a revoked grant be treated as
+        untrusted recorded nothing that identified them.</li>
+        <li>Gave the audit log entry a member table
+        (<xref target="audit-requirements"/>), the extension size limit a
+        value (<xref target="static-field-encoding"/>), the policy document
+        table a type column (<xref target="policy-document-structure"/>), the
+        content hash a stated scope (<xref target="signature-coverage"/>),
+        string equality one rule (<xref target="document-encoding"/>), and
+        the serial number its DER encoding
+        (<xref target="certificate-profile"/>).  Redrew the CSR flow
+        (<xref target="csr-flow"/>) to show the dual attestation that
+        <xref target="template-dual-signature"/> requires, added
+        <xref target="untrusted-input"/>, listed every field-bearing section
+        in <xref target="field-placement"/>, and moved OAuth 2.0 and Token
+        Exchange to the informative references, since neither is needed to
+        implement anything here.</li>
       </ul>
     </section>
 

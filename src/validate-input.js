@@ -41,7 +41,12 @@ import { DenyError } from './errors.js';
 // ── Caps ────────────────────────────────────────────────────────────────────
 /** Checked BEFORE parsing — a parser is a poor place to discover a 40MB string. */
 export const MAX_DOCUMENT_BYTES = 256 * 1024;
-export const MAX_PEM_BYTES      = 16 * 1024;
+/**
+ * Above the §8.2 extension limit on purpose: a certificate carrying a 16384-octet
+ * Agent Template extension is about 22 KiB of PEM, and the draft's own limit
+ * must be the one that refuses it, not this cap.
+ */
+export const MAX_PEM_BYTES      = 32 * 1024;
 export const MAX_SCOPE_LENGTH   = 64;
 export const MAX_SCOPES         = 32;
 export const MAX_TEXT_LENGTH    = 128;
@@ -51,6 +56,12 @@ export const MAX_NESTING_DEPTH  = 32;
 export const MAX_TTL_SECONDS    = 604800;
 /** §19.2 — a nonce is at least 128 bits of CSPRNG output. */
 export const MIN_NONCE_BYTES    = 16;
+/**
+ * §19.2 — sixty seconds, either direction. Lives here rather than in mint.js
+ * because both the Registry (mint.js) and the grant validator (bounds.js)
+ * apply it, and bounds.js must not import the issuer.
+ */
+export const FRESHNESS_WINDOW_MS = 60_000;
 
 /** Keys that are refused anywhere in a pasted document — prototype pollution. */
 export const FORBIDDEN_KEYS = Object.freeze(['__proto__', 'constructor', 'prototype']);
@@ -69,7 +80,8 @@ const SCOPE = /^[a-z0-9:_-]{1,64}$/;
 const TEXT  = /^[A-Za-z0-9@._:+/-][A-Za-z0-9 @._:+/-]{0,127}$/;
 /** §3 — RFC 3339 in UTC with the Z designator. No offset, no lowercase z. */
 const ISO   = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?Z$/;
-const PEM   = /^-----BEGIN ([A-Z][A-Z ]{0,40})-----\n([A-Za-z0-9+/=\n]{1,20000})-----END ([A-Z][A-Z ]{0,40})-----\n?$/;
+/** The body bound tracks MAX_PEM_BYTES: 32 KiB of text, and the byte cap is checked first. */
+const PEM   = /^-----BEGIN ([A-Z][A-Z ]{0,40})-----\n([A-Za-z0-9+/=\n]{1,33000})-----END ([A-Z][A-Z ]{0,40})-----\n?$/;
 const B64   = /^[A-Za-z0-9+/]{4,}={0,2}$/;
 
 const MIN_TIME = Date.UTC(2000, 0, 1);
@@ -444,6 +456,10 @@ export const KNOWN_DOCUMENT_FIELDS = new Set([
   'chain', 'authorities', 'crl', 'audit',
   // §3.1 envelopes: the dynamic policy (§11.4) and the cross-org grant (§13.2)
   'policy', 'grant',
+  // The policies the Registry holds IN FORCE, one envelope per subject — what
+  // §10.2 step 3 is evaluated against, retrieved through policy_ref. `policy`
+  // above is an UPDATE being presented; these are the store it updates.
+  'policies',
   // Registry context the page carries so replay can be demonstrated (§11.4)
   'current_policy_version',
   // output, present when a validated document is pasted back in

@@ -16,7 +16,7 @@ import { runPipeline, DRAFT } from '../src/pipeline.js';
 import { canonicalize } from '../src/canonical.js';
 import { parseCertificate, parseTemplateExtension, parseSpawnExtension } from '../src/x509.js';
 import { spawnAcrossOrganizations, childOf, parentOf } from '../src/scenarios.js';
-import { blockPreimage } from '../src/audit-chain.js';
+import { entryPreimage } from '../src/audit-chain.js';
 
 const root = new URL('..', import.meta.url).pathname;
 const out = `${root}docs/draft/vectors/`;
@@ -39,14 +39,15 @@ const preimages = (d) => ({
   agent_template_child: canonicalize(parseTemplateExtension(parseCertificate(childOf(d).cert_pem))),
   agent_spawn_child: canonicalize(parseSpawnExtension(parseCertificate(childOf(d).cert_pem))),
   policy_body: canonicalize(d.policy.body),
+  policies_in_force: (d.policies ?? []).map((p) => canonicalize(p.body)),
   ...(d.grant ? { grant_body: canonicalize(d.grant.body) } : {}),
-  audit_entries: d.audit.chain.map(blockPreimage),
+  audit_entries: d.audit.chain.map(entryPreimage),
 });
 
 const common = {
   draft: DRAFT,
   generated_at: now.toISOString(),
-  note: 'Every signature is ECDSA P-256 with SHA-256, fixed-width r‖s, base64 (§3.1 Table 2). Signatures are randomized: verify them, do not compare them. Certificates carry the Agent Template extension (§8.2) and, on the child, the Agent Spawn extension (§10.5), both critical. openssl verify refuses them by design; openssl verify -ignore_critical accepts them.',
+  note: 'Every signature is ECDSA P-256 with SHA-256, fixed-width r‖s, base64 (§3.1 Table 2). Signatures are randomized: verify them, do not compare them. Certificates carry the Agent Template extension (§8.2) and, on the child, the Agent Spawn extension (§10.5, grant_id present exactly when the spawn crossed organizations), both critical. `policies` are the envelopes the Registry holds in force (§11.4), which §10.2 step 3 was evaluated against; `audit` is the Registry\'s log, its spawn entry shaped as §10.4 Table 6. openssl verify refuses the certificates by design; openssl verify -ignore_critical accepts them.',
 };
 
 writeFileSync(`${out}01-single-organization.json`, JSON.stringify({
@@ -63,6 +64,7 @@ writeFileSync(`${out}01-single-organization.json`, JSON.stringify({
     authorities: { owner: { common_name: single.authorities.owner.common_name, cert_pem: single.authorities.owner.cert_pem },
       pa: { common_name: single.authorities.pa.common_name, cert_pem: single.authorities.pa.cert_pem } },
     policy: single.policy,
+    policies: single.policies,
     current_policy_version: single.current_policy_version,
     crl: single.crl,
     audit: single.audit,
@@ -79,6 +81,7 @@ writeFileSync(`${out}02-cross-organization-grant.json`, JSON.stringify({
     authorities: { owner: { common_name: doc.authorities.owner.common_name, cert_pem: doc.authorities.owner.cert_pem },
       pa: { common_name: doc.authorities.pa.common_name, cert_pem: doc.authorities.pa.cert_pem } },
     policy: doc.policy,
+    policies: doc.policies,
     current_policy_version: doc.current_policy_version,
     grant: doc.grant,
     crl: doc.crl,

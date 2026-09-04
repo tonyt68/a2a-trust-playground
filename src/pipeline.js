@@ -9,9 +9,9 @@
  *   4  dual signature           §3.1, §11.3, §9.2
  *   5  policy field guard       §11.4
  *   6  required fields          §11.4, §11.6
- *   7  spawn rule, grants       §10.1, §10.2, §13
+ *   7  spawn rule, policy in force, grants   §10.1, §10.2, §10.5, §13
  *   8  scope containment        §10.3
- *   9  audit chain append       §19.7
+ *   9  audit entries, chain     §10.4, §19.7
  *
  * ── The stages array IS the decision log ───────────────────────────────────
  *
@@ -40,7 +40,7 @@ import { validateUuid, assertKnownKeys } from './validate-input.js';
 import { validateCertificate, validateAnchor, subjectCN } from './x509.js';
 import { validatePolicyUpdate, isPolicyUpdate } from './policy.js';
 import {
-  assertNotRevoked, assertSpawnPermitted, assertScopeSubset, validateGrant,
+  assertNotRevoked, assertSpawnPermitted, assertSpawnInPolicy, assertScopeSubset, validateGrant,
 } from './bounds.js';
 import { AuditChain } from './audit-chain.js';
 
@@ -53,7 +53,7 @@ export const DRAFT = 'draft-tonyai-a2a-trust-03';
  */
 export const NOT_APPLICABLE = Object.freeze([
   { check: 'max_children_enforcement', section: '10.2',
-    reason: 'the Registry holds the count and enforces MaxChildren atomically at spawn time; this page checks the document for consistency with the cap and does not present that as enforcement' },
+    reason: 'the Registry holds the count and enforces MaxChildren atomically at spawn time — this page\'s Registry does so when it mints, and refuses the sixth step for a template that already has a live certificate; this walk checks the document for consistency with the cap and with the policy in force, and does not present either as enforcement' },
   { check: 'policy_engine_gate', section: '11.7',
     reason: 'step 2 is a policy engine the Policy Authority consults before countersigning; this page verifies the countersignature and the static bounds, not the engine' },
 ]);
@@ -279,14 +279,21 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
     }
     const nonces = children.map((n) => byId.get(n.metadata.agent_id).spawn.spawn_nonce);
     if (new Set(nonces).size !== nonces.length) {
+      // §10.5 — a consistency check on the document: the Registry accepts each
+      // nonce once; a relying party holding one chain cannot observe another.
       const e = new DenyError('ERR_NONCE_REUSED', 'two certificates in the chain carry the same spawn_nonce');
       e.subject = 'CHILD AGENT'; step('CHILD AGENT', 'DENY', e.detail); throw e;
     }
 
     // ── Authorities: validated to the anchor before any signature is trusted (§9.2)
     const authorities = document.authorities ?? {};
+    const policiesInForce = document.policies ?? [];
+    if (!Array.isArray(policiesInForce)) {
+      throw new DenyError('ERR_SCHEMA_VIOLATION', 'policies must be an array of §3.1 envelopes');
+    }
     const needAuthorities = isPolicyUpdate(document)
-      || (document.grant !== undefined && document.grant !== null);
+      || (document.grant !== undefined && document.grant !== null)
+      || policiesInForce.length > 0;
     // Attributed to whichever walk step actually needs the authorities: the
     // grant if one is present, the policy update otherwise — so a refusal here
     // still produces a DENY row in `walk`, the way every other block's does.
@@ -337,6 +344,17 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
             ownerCertPem: authorities.owner.cert_pem, paCertPem: authorities.pa.cert_pem,
             now, spawnsUnderGrant: underGrant,
           });
+          // §10.5 — a cross-organizational spawn records the grant it was
+          // issued under, and it must be THIS grant: that member is what lets
+          // §13.4 revoke the certificates a revoked grant produced.
+          if (!c.spawn.grant_id) {
+            throw new DenyError('ERR_GRANT_ID_MISMATCH',
+              `${c.label}: spawned across organizations, but the certificate names no grant`);
+          }
+          if (c.spawn.grant_id !== body.grant_id) {
+            throw new DenyError('ERR_GRANT_INVALID',
+              `the certificate was issued under grant ${c.spawn.grant_id.slice(0, 8)}…, not this one (${body.grant_id.slice(0, 8)}…)`);
+          }
           grantScopes.set(node.metadata.agent_id, body.allowed_scopes);
         }
         const g = document.grant.body;
@@ -370,8 +388,8 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
     }
 
     // ── Stages 4-6 — the policy envelope (§3.1, §11) ──────────────────────
+    const templates = new Map([...byId].map(([id, v]) => [id, { template: v.template, notAfter: v.notAfter }]));
     if (isPolicyUpdate(document)) {
-      const templates = new Map([...byId].map(([id, v]) => [id, { template: v.template, notAfter: v.notAfter }]));
       let result;
       try {
         result = await validatePolicyUpdate({
@@ -401,16 +419,42 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
 
     // ── Stage 7 — the two-check spawn rule, from the PARENT's certificate ───
     try {
+    // The policies the document says the Registry holds in force (§11.4):
+    // each a §3.1 envelope, both signatures verified, bounded by the template
+    // of the subject it governs. What §10.2 step 3 was evaluated against.
+    /** subject -> the in-force policy body */
+    const inForce = new Map();
+    for (const envelope of policiesInForce) {
+      const r = await validatePolicyUpdate({
+        document: { policy: envelope }, templates, now,
+        ownerCertPem: authorities.owner.cert_pem, paCertPem: authorities.pa.cert_pem,
+      });
+      if (inForce.has(r.subject)) {
+        throw new DenyError('ERR_SCHEMA_VIOLATION', `two policies in force for ${r.subject.slice(0, 8)}… — a subject has one`);
+      }
+      inForce.set(r.subject, envelope.body);
+    }
     for (const node of children) {
       const c = byId.get(node.metadata.agent_id);
-      const parentT = byId.get(c.spawn.parent_agent_id).template;
+      const parent = byId.get(c.spawn.parent_agent_id);
+      const parentT = parent.template;
       const siblings = children.filter((n) =>
         byId.get(n.metadata.agent_id).spawn.parent_agent_id === c.spawn.parent_agent_id
         && n.metadata.agent_id !== node.metadata.agent_id).length;
       assertSpawnPermitted({ parentTemplate: parentT, childId: node.metadata.agent_id, siblings });
+      // §10.2 step 3 — consistency with the policy in force for the parent.
+      assertSpawnInPolicy({
+        policy: inForce.get(c.spawn.parent_agent_id) ?? null,
+        childId: node.metadata.agent_id, parentId: c.spawn.parent_agent_id,
+      });
+      // §10.5 — grant_id is present exactly when the spawn crossed organizations.
+      if (c.template.org_id === parentT.org_id && c.spawn.grant_id) {
+        throw new DenyError('ERR_GRANT_ID_MISMATCH',
+          `${c.label}: the certificate names a grant, but parent and child are in one organization`);
+      }
     }
     record(stages, 7, '10.1', 'PASS', children.length
-      ? 'DELEGATION: parent holds spawn, child is in CanSpawn; child count is consistent with MaxChildren (the Registry enforces the cap)'
+      ? 'DELEGATION: parent holds spawn, child is in CanSpawn and in the policy in force; child count is consistent with MaxChildren (the Registry enforces the cap)'
       : 'no spawn in this chain', 'DELEGATION');
 
     // ── Stage 8 — scope containment (§10.3) ─────────────────────────────────
@@ -447,13 +491,17 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
       ? advisories[0].detail
       : children.length ? 'child scopes are a subset of the parent, spawn rule and cap satisfied' : 'no delegation in this chain');
 
-    // ── Stage 9 — audit integrity (§19.7) ──────────────────────────────────
+    // ── Stage 9 — the audit entries (§10.4) and audit integrity (§19.7) ────
+    try { audit.assertEntries(); } catch (e) {
+      if (e instanceof DenyError) { e.subject = 'AUDIT CHAIN'; step('AUDIT CHAIN', 'DENY', e.detail); }
+      throw e;
+    }
     const integrity = await audit.verify();
     if (!integrity.valid) {
       const e = new DenyError('ERR_AUDIT_CHAIN_BROKEN', integrity.reason ?? 'hash chain is broken');
       e.subject = 'AUDIT CHAIN'; step('AUDIT CHAIN', 'DENY', e.detail); throw e;
     }
-    await audit.append({ action: 'verify_chain', decision: 'ALLOWED',
+    await audit.append({ action: 'verify_chain', outcome: 'ALLOWED',
       agents: agents.map((n) => n.metadata.agent_id) }, now);
     record(stages, 9, '19.7', 'PASS', `hash chain valid across ${audit.length} entr(ies)`);
     step('AUDIT CHAIN', 'PASS', `intact across ${audit.length} entr${audit.length === 1 ? 'y' : 'ies'}`);
@@ -483,7 +531,7 @@ export async function runPipeline({ document, now = new Date(), version = '1.0.0
         .map((n) => n.metadata?.agent_id)
         .filter(Boolean);
       await audit.append({
-        action: 'verify_chain', decision: 'DENIED', reason: deny.code,
+        action: 'verify_chain', outcome: 'DENIED', reason: deny.code,
         ...(covered.length ? { agents: covered } : {}),
       }, now);
     } catch { /* an audit failure must not mask the original refusal */ }

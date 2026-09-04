@@ -39,9 +39,20 @@ describe('the seeded chain is shaped for the demonstration', () => {
     expect(p.allowed_scopes).toEqual(['read:events', 'write:events']);
     expect(c.allowed_scopes).toEqual(['read:events']);
     expect(p.can_spawn).toEqual([c.subject]);
-    expect(p.max_children).toBe(2);
+    expect(p.max_children).toBe(1);   // §8.1: never above the children CanSpawn names
     expect(p.permitted_operations).toContain('spawn');
     expect(c.permitted_operations).not.toContain('spawn');
+  });
+  it('carries the two policies the Registry holds in force; the parent’s names the child as a spawn target (§10.2 step 3)', () => {
+    expect(doc.policies).toHaveLength(2);
+    const byId = new Map(doc.policies.map((p) => [p.body.subject, p]));
+    const p = byId.get(parentOf(doc).metadata.agent_id);
+    expect(p.body.spawn_targets).toEqual([childOf(doc).metadata.agent_id]);
+    expect(Object.keys(p).sort()).toEqual(['body', 'content_hash', 'owner_sig', 'pa_sig']);
+    expect(byId.get(childOf(doc).metadata.agent_id).body.version).toBe(doc.current_policy_version);
+  });
+  it('the child’s certificate names no grant — one organization (§10.5)', () => {
+    expect('grant_id' in spawnOf(childOf(doc))).toBe(false);
   });
   it('the child carries CA-attested provenance (§10.5)', () => {
     const s = spawnOf(childOf(doc));

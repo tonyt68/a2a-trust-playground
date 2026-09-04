@@ -36,7 +36,7 @@ import {
   validateTtl, validateTimestamp, validateNonce, assertFlatObject, parseJsonStrict,
   JsonSyntaxError, MAX_CHILDREN,
 } from './validate-input.js';
-import { canonicalize, TEMPLATE_FIELDS, SPAWN_FIELDS } from './canonical.js';
+import { canonicalize, TEMPLATE_FIELDS, SPAWN_FIELDS, SPAWN_OPTIONAL_FIELDS } from './canonical.js';
 import { bytesToHex } from './encoding.js';
 
 /** OID 2.5.4.3 — commonName. */
@@ -47,8 +47,16 @@ export const TEMPLATE_EXT_OID = '2.25.318754453516410815925104555075461256891';
 /** §10.5 — the Agent Spawn extension. */
 export const SPAWN_EXT_OID = '2.25.316124730704531463413455892107752909312';
 
-/** §8.2 — a limit is imposed before parsing. Nine short members fit in far less. */
-export const MAX_EXTENSION_BYTES = 4096;
+/**
+ * §8.2 — the limits a relying party imposes on extnValue BEFORE parsing it:
+ * 16384 octets for the Agent Template extension (two hundred scopes at the
+ * §10.3 maximum fit), 1024 for the Agent Spawn extension (a fixed-shape
+ * object with room to spare). Stated by the draft, not chosen here.
+ */
+export const MAX_TEMPLATE_EXTENSION_BYTES = 16384;
+export const MAX_SPAWN_EXTENSION_BYTES = 1024;
+/** RFC 5280 §4.1.2.2 — a serial number is at most 20 octets. */
+export const MAX_SERIAL_OCTETS = 20;
 
 /** §7.1 — 128-bit security level (SP 800-57): RSA-3072, P-256, P-384, Ed25519. */
 export const MIN_SECURITY_BITS = 128;
@@ -325,6 +333,31 @@ export function assertSerialEntropy(cert) {
 }
 
 /**
+ * §7.1 — the serial is an ASN.1 INTEGER that RFC 5280 requires to be positive,
+ * at most 20 octets, and in minimal DER form. The content octets are read
+ * as encoded: a leading 0x00 is legal only when the octet after it has its
+ * top bit set (X.690 §8.3.2), and a first octet with its top bit set is a
+ * negative number.
+ */
+export function assertSerialEncoding(cert) {
+  const bytes = new Uint8Array(cert.serialNumber.valueBlock.valueHexView);
+  if (bytes.length === 0) {
+    throw new DenyError('ERR_SERIAL_ENCODING', 'serial number is empty');
+  }
+  if (bytes.length > MAX_SERIAL_OCTETS) {
+    throw new DenyError('ERR_SERIAL_ENCODING',
+      `serial number is ${bytes.length} octets; RFC 5280 permits at most ${MAX_SERIAL_OCTETS}`);
+  }
+  if (bytes[0] & 0x80) {
+    throw new DenyError('ERR_SERIAL_ENCODING', 'serial number encodes a negative INTEGER');
+  }
+  if (bytes.length > 1 && bytes[0] === 0x00 && !(bytes[1] & 0x80)) {
+    throw new DenyError('ERR_SERIAL_ENCODING',
+      'serial number carries a leading zero octet the next octet does not need — not minimal DER');
+  }
+}
+
+/**
  * Signature digest floor (§7.1). The key floor is elsewhere; this puts the
  * matching floor under the DIGEST. SHA-1 has practical collision attacks, and a
  * strong key signed with a broken hash is not a strong guarantee.
@@ -484,7 +517,7 @@ export async function isSignedBy(cert, issuerCert) {
  * byte-identical to its own canonical form. "Not valid JCS" is refused rather
  * than repaired — the draft forbids re-canonicalizing.
  */
-function decodeJcsExtension(cert, oid, code, label) {
+function decodeJcsExtension(cert, oid, code, label, limit) {
   const found = extensions(cert, oid);
   if (found.length === 0) return null;
   if (found.length > 1) {
@@ -493,8 +526,10 @@ function decodeJcsExtension(cert, oid, code, label) {
   const ext = found[0];
   if (!ext.critical) throw new DenyError(code, `${label} extension is not marked critical`);
   const bytes = new Uint8Array(ext.extnValue.valueBlock.valueHexView);
-  if (bytes.length > MAX_EXTENSION_BYTES) {
-    throw new DenyError(code, `${label} extension is ${bytes.length} bytes; the limit is ${MAX_EXTENSION_BYTES}`);
+  // §8.2 — the limit is applied to the octets, before any of them is decoded.
+  if (bytes.length > limit) {
+    throw new DenyError('ERR_EXTENSION_TOO_LARGE',
+      `${label} extension is ${bytes.length} octets; the limit is ${limit}, and it is not parsed`);
   }
   let text;
   try {
@@ -517,12 +552,12 @@ function decodeJcsExtension(cert, oid, code, label) {
   return obj;
 }
 
-function assertExactMembers(obj, fields, code, label) {
+function assertExactMembers(obj, fields, code, label, optional = []) {
   const keys = Object.keys(obj);
   const missing = fields.filter((f) => !keys.includes(f));
   if (missing.length) throw new DenyError(code, `${label} extension omits ${missing.join(', ')}`);
-  const extra = keys.filter((k) => !fields.includes(k)).sort();
-  if (extra.length) throw new DenyError(code, `${label} extension carries ${extra.join(', ')}, which Table lists no member for`);
+  const extra = keys.filter((k) => !fields.includes(k) && !optional.includes(k)).sort();
+  if (extra.length) throw new DenyError(code, `${label} extension carries ${extra.join(', ')}, which its table lists no member for`);
 }
 
 const OPERATION = /^[a-z0-9:_-]{1,64}$/;
@@ -558,6 +593,14 @@ export function assertTemplateMembers(t, code = 'ERR_TEMPLATE_EXT_INVALID') {
       throw new DenyError(code, 'can_spawn contains duplicates');
     }
     validateInteger(t.max_children, 'max_children', 0, MAX_CHILDREN);
+    // §8.1 — a template defines one agent, so each CanSpawn entry names a child
+    // that exists at most once at a time; a cap above that count is a cap on
+    // nothing, and the gate refuses it rather than let a validator count
+    // toward a limit that can never be reached.
+    if (t.max_children > t.can_spawn.length) {
+      throw new DenyError('ERR_MAX_CHILDREN_EXCEEDS_CAN_SPAWN',
+        `max_children is ${t.max_children} but can_spawn names ${t.can_spawn.length} child(ren)`);
+    }
     validateReference(t.policy_ref, 'policy_ref');
     validateTtl(t.ttl_seconds, 'ttl_seconds');
   } catch (e) {
@@ -577,7 +620,8 @@ export function assertTemplateMembers(t, code = 'ERR_TEMPLATE_EXT_INVALID') {
  * @returns {object} the nine members, typed and checked
  */
 export function parseTemplateExtension(cert) {
-  const t = decodeJcsExtension(cert, TEMPLATE_EXT_OID, 'ERR_TEMPLATE_EXT_INVALID', 'Agent Template');
+  const t = decodeJcsExtension(cert, TEMPLATE_EXT_OID, 'ERR_TEMPLATE_EXT_INVALID', 'Agent Template',
+    MAX_TEMPLATE_EXTENSION_BYTES);
   if (t === null) {
     throw new DenyError('ERR_TEMPLATE_EXT_MISSING', 'agent certificate carries no Agent Template extension');
   }
@@ -598,13 +642,17 @@ export function parseTemplateExtension(cert) {
  * question, because it depends on the chain.
  */
 export function parseSpawnExtension(cert) {
-  const s = decodeJcsExtension(cert, SPAWN_EXT_OID, 'ERR_SPAWN_EXT_INVALID', 'Agent Spawn');
+  const s = decodeJcsExtension(cert, SPAWN_EXT_OID, 'ERR_SPAWN_EXT_INVALID', 'Agent Spawn',
+    MAX_SPAWN_EXTENSION_BYTES);
   if (s === null) return null;
-  assertExactMembers(s, SPAWN_FIELDS, 'ERR_SPAWN_EXT_INVALID', 'Agent Spawn');
+  assertExactMembers(s, SPAWN_FIELDS, 'ERR_SPAWN_EXT_INVALID', 'Agent Spawn', SPAWN_OPTIONAL_FIELDS);
   try {
     validateUuid(s.parent_agent_id, 'parent_agent_id');
     validateTimestamp(s.spawned_at, 'spawned_at');
     validateNonce(s.spawn_nonce, 'spawn_nonce');
+    // §10.5 — present exactly when the spawn was cross-organizational; whether
+    // it SHOULD be present depends on the parent, which is the pipeline's question.
+    if ('grant_id' in s) validateUuid(s.grant_id, 'grant_id');
   } catch (e) {
     if (e instanceof DenyError && e.code !== 'ERR_SCHEMA_VIOLATION') throw e;
     throw new DenyError('ERR_SPAWN_EXT_INVALID', e.detail || e.message);
@@ -698,6 +746,7 @@ export async function validateCertificate({ certPem, caPem = null, caCert = null
   assertBasicConstraints(ca, { mustBeCa: true });
   assertKeyUsage(cert, { isCa: false });
   assertKeyUsage(ca, { isCa: true });
+  assertSerialEncoding(cert);
   assertSerialEntropy(cert);
 
   if (!(await isSignedBy(cert, ca))) {

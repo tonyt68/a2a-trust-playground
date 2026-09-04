@@ -27,12 +27,11 @@
 import { DenyError } from './errors.js';
 import {
   validateScopeSet, validateUuid, validateText, validateInteger, validateTimestamp,
-  assertFlatObject,
+  assertFlatObject, FRESHNESS_WINDOW_MS,
 } from './validate-input.js';
 import { GRANT_FIELDS, ENVELOPE_FIELDS } from './canonical.js';
 import { publicKeyFromCertificate, verifyBody } from './crypto-sign.js';
 import { parseCertificate, subjectCN, spkiHex } from './x509.js';
-import { FRESHNESS_WINDOW_MS } from './mint.js';
 
 /**
  * Stage 3 — revocation (§14) and the Registry's DISABLED state (§12.4).
@@ -87,6 +86,34 @@ export function assertSpawnPermitted({ parentTemplate, childId, siblings = 0 }) 
   if (siblings + 1 > parentTemplate.max_children) {
     throw new DenyError('ERR_MAX_CHILDREN',
       `the document names ${siblings + 1} child(ren) of a parent whose MaxChildren is ${parentTemplate.max_children}`);
+  }
+}
+
+/**
+ * §10.2 step 3 — the child is a SpawnTargets entry of the policy in force for
+ * the spawning agent. The Registry evaluates this when it issues, against the
+ * policy it retrieves through policy_ref; a chain document carries the
+ * policies it says were in force, and this is the same consistency reading
+ * §10.2 gives MaxChildren: the document must agree with the cap the Registry
+ * enforced. An absent policy grants nothing (§11.4), and no policy in force is
+ * a refusal under §15.1, not a pass.
+ *
+ * @param {object} opts
+ * @param {object|null} opts.policy  the parent's in-force policy body, or null when none is
+ * @param {string} opts.childId
+ * @param {string} [opts.parentId]   for the detail only
+ */
+export function assertSpawnInPolicy({ policy, childId, parentId = null }) {
+  validateUuid(childId, 'child agent_id');
+  const who = parentId ? ` for ${parentId.slice(0, 8)}…` : '';
+  if (policy === null || typeof policy !== 'object') {
+    throw new DenyError('ERR_SPAWN_NOT_IN_POLICY',
+      `no policy is in force${who} — step 3 of §10.2 cannot have passed, and no policy grants no spawn targets`);
+  }
+  const targets = Array.isArray(policy.spawn_targets) ? policy.spawn_targets : [];
+  if (!targets.includes(childId)) {
+    throw new DenyError('ERR_SPAWN_NOT_IN_POLICY',
+      `the policy in force${who} (version ${policy.version}) grants ${targets.length} spawn target(s), and the child is not among them`);
   }
 }
 
@@ -158,9 +185,10 @@ export async function validateGrant({
   const missing = GRANT_FIELDS.filter((f) => !keys.includes(f));
   if (missing.length) throw new DenyError('ERR_GRANT_INVALID', `grant omits ${missing.join(', ')}`);
   const extra = keys.filter((k) => !GRANT_FIELDS.includes(k)).sort();
-  if (extra.length) throw new DenyError('ERR_GRANT_INVALID', `grant carries ${extra.join(', ')}, which Table 10 does not define`);
+  if (extra.length) throw new DenyError('ERR_GRANT_INVALID', `grant carries ${extra.join(', ')}, which Table 11 does not define`);
 
   try {
+    validateUuid(body.grant_id, 'grant_id');
     validateText(body.grantor, 'grantor');
     validateText(body.grantee, 'grantee');
     validateUuid(body.template, 'template');
@@ -170,7 +198,7 @@ export async function validateGrant({
     validateInteger(body.max_spawns, 'max_spawns', 0, 1_000_000);
   } catch (e) {
     if (e instanceof DenyError && e.code !== 'ERR_FIELD_CHARSET' && e.code !== 'ERR_FIELD_RANGE'
-        && e.code !== 'ERR_SCHEMA_VIOLATION') throw e;
+        && e.code !== 'ERR_SCHEMA_VIOLATION' && e.code !== 'ERR_AGENT_ID_FORMAT') throw e;
     throw new DenyError('ERR_GRANT_INVALID', e.detail || e.message);
   }
 

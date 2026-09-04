@@ -52,6 +52,7 @@ describeIfDraft('every cited clause exists in the draft', () => {
     expect(sections.get('10.5')).toBe('Encoding of Spawn Provenance');
     expect(sections.get('18')).toBe('Implementation Status');
     expect(sections.get('19.7')).toBe('Audit Integrity');
+    expect(sections.get('19.10')).toBe('Parsing Untrusted Input');
   });
 
   /** What each refusal is ABOUT, by title rather than by number. */
@@ -73,9 +74,12 @@ describeIfDraft('every cited clause exists in the draft', () => {
     ERR_WEAK_SIGNATURE: 'Certificate Profile',
     ERR_KEY_USAGE: 'Certificate Profile',
     ERR_SERIAL_ENTROPY: 'Certificate Profile',
+    ERR_SERIAL_ENCODING: 'Certificate Profile',
     ERR_NO_REVOCATION_SOURCE: 'Locating Revocation State',
     ERR_TEMPLATE_EXT_MISSING: 'Encoding of Static Fields',
     ERR_TEMPLATE_EXT_INVALID: 'Encoding of Static Fields',
+    ERR_EXTENSION_TOO_LARGE: 'Encoding of Static Fields',
+    ERR_MAX_CHILDREN_EXCEEDS_CAN_SPAWN: 'Static Fields',
     ERR_TTL_TOO_LONG: 'Issuance',
     ERR_VALIDITY_EXCEEDS_TTL: 'Issuance',
     ERR_SPAWN_EXT_INVALID: 'Encoding of Spawn Provenance',
@@ -106,7 +110,9 @@ describeIfDraft('every cited clause exists in the draft', () => {
     ERR_CONTENT_HASH: 'Signature and Hash Coverage',
     ERR_SPAWN_NOT_PERMITTED: 'Two-Check Spawn Rule',
     ERR_CHILD_NOT_WHITELISTED: 'Two-Check Spawn Rule',
+    ERR_SPAWN_NOT_IN_POLICY: 'Spawn Validation Sequence',
     ERR_MAX_CHILDREN: 'Spawn Validation Sequence',
+    ERR_GRANT_ID_MISMATCH: 'Encoding of Spawn Provenance',
     ERR_GRANT_MISSING: 'Explicit Grant Requirement',
     ERR_GRANT_INVALID: 'Grant Structure',
     ERR_GRANT_EXPIRED: 'Grant Structure',
@@ -114,6 +120,7 @@ describeIfDraft('every cited clause exists in the draft', () => {
     ERR_MAX_SPAWNS: 'Grant Structure',
     ERR_SCOPE_ESCALATION: 'Scope Constraint',
     ERR_EMPTY_SCOPES: 'Scope Constraint',
+    ERR_AUDIT_ENTRY_INVALID: 'Audit Requirements',
     ERR_AUDIT_CHAIN_BROKEN: 'Audit Integrity',
     ERR_TEMPLATE_NONCONFORMING: 'Conformance Gate',
     ERR_TEMPLATE_SIGNATURE: 'Dual Attestation',

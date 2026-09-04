@@ -82,17 +82,29 @@ Underneath, that is nine ordered checks:
 | 4 | Both signatures over the JCS form of `body`, distinct keys, Owner CN binding | §3.1, §11.3, §9.2 | [policy.js](src/policy.js) |
 | 5 | Policy field guard — the §11.4 field set is complete, envelope members stay outside | §11.4, §11.6 | [policy.js](src/policy.js) |
 | 6 | Required fields, version currency, content hash, lifetime | §11.4, §11.6 | [policy.js](src/policy.js) |
-| 7 | Two-check spawn rule from the parent's certificate; MaxChildren consistency; cross-org grants | §10.1, §10.2, §13 | [bounds.js](src/bounds.js) |
+| 7 | Two-check spawn rule from the parent's certificate; the policy in force names the child (§10.2 step 3); MaxChildren consistency; grant_id and cross-org grants | §10.1, §10.2, §10.5, §13 | [bounds.js](src/bounds.js) |
 | 8 | Scope containment, set semantics, fail-closed on the empty request | §10.3 | [bounds.js](src/bounds.js) |
-| 9 | Audit hash chain over the same canonical form | §11.5, §19.7 | [audit-chain.js](src/audit-chain.js) |
+| 9 | Audit entries against Table 6, hash chain over the same canonical form | §10.4, §11.5, §19.7 | [audit-chain.js](src/audit-chain.js) |
 
 Any failure is a DENY carrying an error code and the governing clause. The
 `stages` array in the exported JSON *is* the decision log the UI renders, so the
 log and the export cannot disagree.
 
+The Registry the page mints and rebuilds *does* enforce MaxChildren, MaxSpawns
+and one-live-certificate-per-template — it holds the counts, the policy store,
+and its own §10.4 audit chain, and applies all of that at spawn time
+(`src/mint.js`). What the walk's stage 7 checks is the CHAIN DOCUMENT for
+consistency with what the Registry already decided — a relying party holding
+one document cannot re-derive a Registry's live state, only confirm the
+document it received agrees with itself.
+
 **Two things are not implemented**, and the page says so inline where each
-would have run: the Registry-side *enforcement* of MaxChildren (§10.2 — the page
-checks the document for consistency with the cap and does not present that as
+would have run: the *policy engine* a Policy Authority consults before
+countersigning (§11.7 step 2 — the page verifies the countersignature and the
+static bounds, not the engine); the Registry-side *enforcement* of MaxChildren
+in a MULTI-PARTY deployment, as opposed to the single in-tab Registry this page
+plays (§10.2 — the page checks the document for consistency with the cap and
+does not present that as
 enforcement) and the policy-engine gate of §11.7 step 2.
 
 The Registry side of the draft — the conformance gate (§9.1), dual attestation

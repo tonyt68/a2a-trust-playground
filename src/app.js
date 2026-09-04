@@ -29,8 +29,8 @@ import { Registry, newAgentId, newNonce, FRESHNESS_WINDOW_MS } from './mint.js';
 import { KEY_USAGE } from './x509.js';
 import { signEnvelope, privateKeyFromPem, contentHash } from './crypto-sign.js';
 import {
-  childOf, parentOf, templateOf, reissueThroughRegistry, issueRaw, resignPolicy,
-  spawnAcrossOrganizations, issueSecondChildWithNonce,
+  childOf, parentOf, templateOf, spawnOf, inForceOf, setInForcePolicy, dropInForcePolicy, reissueThroughRegistry,
+  issueRaw, resignPolicy, spawnAcrossOrganizations, issueSecondChildWithNonce,
 } from './scenarios.js';
 import { describeCertificate } from './x509-explain.js';
 import { runPipeline, NOT_APPLICABLE, DRAFT } from './pipeline.js';
@@ -134,7 +134,7 @@ view('reference', ({ document: doc, result }) => {
       entries: doc.audit?.chain?.length ?? 0,
       chain: doc.audit?.chain ?? [],
       head_hash: doc.audit?.chain?.length
-        ? doc.audit.chain[doc.audit.chain.length - 1].hash : null,
+        ? doc.audit.chain[doc.audit.chain.length - 1].entry_hash : null,
     },
     error_code: result?.error_code ?? null,
     stages: result?.stages ?? [],
@@ -266,9 +266,12 @@ function failureLocation(result) {
     ERR_MAX_CHILDREN: 'chain[1].cert_pem',
     ERR_CHILD_NOT_WHITELISTED: 'chain[1].cert_pem',
     ERR_SPAWN_NOT_PERMITTED: 'chain[1].cert_pem',
+    ERR_SPAWN_NOT_IN_POLICY: 'policies',
+    ERR_GRANT_ID_MISMATCH: 'chain[2].cert_pem',
     ERR_SCOPE_ESCALATION: 'chain[2].cert_pem',
     ERR_EMPTY_SCOPES: 'chain[2].requested_scopes',
     ERR_AUDIT_CHAIN_BROKEN: 'audit',
+    ERR_AUDIT_ENTRY_INVALID: 'audit',
     ERR_GRANT_MISSING: 'chain[2].cert_pem',
     ERR_GRANT_INVALID: 'grant',
     ERR_GRANT_EXPIRED: 'grant.body.issued_at',
@@ -284,7 +287,7 @@ function failureLocation(result) {
   };
   let path = paths[code] ?? null;
   // Every §7 / §8.2 / §10.5 / §9.3 refusal is about one certificate's bytes.
-  if (!path && (failed?.n === 2 || /^ERR_(MALFORMED_PEM|KEY_TOO_SMALL|BASIC_CONSTRAINTS|WEAK_SIGNATURE|KEY_USAGE|SERIAL_ENTROPY|NO_REVOCATION_SOURCE|TEMPLATE_EXT_|TTL_TOO_LONG|VALIDITY_EXCEEDS_TTL|SPAWN_EXT_INVALID|CHAIN_INVALID|FORGED_ISSUER|SELF_SIGNED|CERT_EXPIRED|NAME_CONSTRAINT|UNKNOWN_CRITICAL_EXT)/.test(code))) {
+  if (!path && (failed?.n === 2 || /^ERR_(MALFORMED_PEM|KEY_TOO_SMALL|BASIC_CONSTRAINTS|WEAK_SIGNATURE|KEY_USAGE|SERIAL_ENTROPY|SERIAL_ENCODING|NO_REVOCATION_SOURCE|TEMPLATE_EXT_|EXTENSION_TOO_LARGE|MAX_CHILDREN_EXCEEDS_CAN_SPAWN|TTL_TOO_LONG|VALIDITY_EXCEEDS_TTL|SPAWN_EXT_INVALID|CHAIN_INVALID|FORGED_ISSUER|SELF_SIGNED|CERT_EXPIRED|NAME_CONSTRAINT|UNKNOWN_CRITICAL_EXT)/.test(code))) {
     path = `${node}.cert_pem`;
   }
 
@@ -308,6 +311,7 @@ const SECTION_TITLES = {
   '7.1': 'Certificate Profile',
   '7.2': 'Binding Identity to the Certificate',
   '7.3': 'Certificate Signing Request Flow',
+  '8.1': 'Static Fields',
   '8.2': 'Encoding of Static Fields',
   '8.3': 'Dynamic Policy Bounds',
   '9.1': 'Conformance Gate',
@@ -316,6 +320,7 @@ const SECTION_TITLES = {
   '10.1': 'Two-Check Spawn Rule',
   '10.2': 'Spawn Validation Sequence',
   '10.3': 'Scope Constraint',
+  '10.4': 'Audit Requirements',
   '10.5': 'Encoding of Spawn Provenance',
   '11.2': 'Ownership',
   '11.3': 'Dual Signature Requirement',
@@ -326,6 +331,7 @@ const SECTION_TITLES = {
   '12.4': 'Template Lifecycle',
   '13.1': 'Explicit Grant Requirement',
   '13.2': 'Grant Structure',
+  '13.4': 'Unilateral Revocation',
   '14': 'Revocation',
   '14.4': 'Locating Revocation State',
   '15.1': 'Fail Closed',
@@ -356,8 +362,8 @@ function sectionRef(section, cls = 'sec') {
 
 /** The groups the buttons fall into, in the order the walk meets them. */
 const PHASES = [
-  { name: 'REGISTRY',  asks: 'what the Registry refuses to issue — the document is untouched' },
   { name: 'IDENTITY',  asks: 'the certificates themselves' },
+  { name: 'REGISTRY',  asks: 'what the Registry refuses to issue — the document is untouched' },
   { name: 'STANDING',  asks: 'revocation and the Registry lifecycle' },
   { name: 'GRANT',     asks: 'authority across organizations' },
   { name: 'BOUNDS',    asks: 'scopes, spawn rights, ceilings' },
@@ -459,7 +465,7 @@ function renderAudit(result, container) {
   container.appendChild(strip);
 
   const head = el('div', 'audit-row head');
-  for (const [cls, label] of [['ln', '#'], ['when', 'Timestamp · UTC'], ['res', 'Decision'],
+  for (const [cls, label] of [['ln', '#'], ['when', 'Timestamp · UTC'], ['res', 'Outcome'],
     ['detail', 'Action'], ['who', 'Agent'], ['rel', 'Relationship'],
     ['hash', 'Links to'], ['hash', 'Hash']]) {
     head.appendChild(el('span', cls, label));
@@ -490,40 +496,48 @@ function renderAudit(result, container) {
     return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 19).replace('T', ' ');
   };
 
+  // Every entry is a flat object (§10.4). A spawn entry carries the Table 6
+  // members — the child template is the agent, the spawning agent its parent;
+  // the page's own decisions carry an `action` and name their agent directly.
+  const GENESIS = '0'.repeat(64);
   const list = el('div', 'audit-list');
-  for (const b of result?.audit?.chain ?? []) {
+  (result?.audit?.chain ?? []).forEach((b, i) => {
+    const isSpawn = 'spawning_agent_id' in b || 'child_template_id' in b;
     const row = el('div', 'audit-row');
-    row.appendChild(el('span', 'ln', String(b.index)));
+    row.appendChild(el('span', 'ln', String(i)));
     row.appendChild(el('span', 'when mono', clock(b.timestamp)));
-    row.appendChild(el('span', `res ${b.event?.decision === 'DENIED' ? 'bad' : 'ok'}`,
-      b.event?.decision ?? '—'));
+    row.appendChild(el('span', `res ${b.outcome === 'DENIED' ? 'bad' : 'ok'}`, b.outcome ?? '—'));
     // Always say WHAT was attempted, then why it was refused.
-    const detail = el('span', 'detail', b.event?.action ?? '—');
-    if (b.event?.reason) {
-      detail.appendChild(el('span', 'why', ` · ${b.event.reason}`));
-    } else if (b.event?.detail) {
-      detail.appendChild(el('span', 'note', ` · ${b.event.detail}`));
+    const action = isSpawn
+      ? `spawn (§10.4)${b.grant_id ? ' · under a grant' : ''}${Array.isArray(b.granted_scopes) && b.granted_scopes.length ? ` · granted ${b.granted_scopes.join(', ')}` : ''}`
+      : (b.action ?? '—');
+    const detail = el('span', 'detail', action);
+    if (b.reason) {
+      detail.appendChild(el('span', 'why', ` · ${b.reason}`));
+    } else if (b.detail) {
+      detail.appendChild(el('span', 'note', ` · ${b.detail}`));
     }
     row.appendChild(detail);
 
-    const agents = Array.isArray(b.event?.agents) ? b.event.agents : null;
+    const agents = Array.isArray(b.agents) ? b.agents : null;
+    const agent = isSpawn ? b.child_template_id : b.agent;
     row.appendChild(agents
       ? idCell(`${agents.length} agents`, agents.join('\n'))
-      : idCell(b.event?.agent, b.event?.agent));
+      : idCell(agent, agent));
 
-    const rel = agents ? 'whole chain' : (relationship.get(b.event?.agent) ?? '');
+    const rel = agents ? 'whole chain' : (isSpawn ? 'child' : (relationship.get(b.agent) ?? ''));
     const relCell = el('span', `rel ${rel === 'child' ? 'is-child' : rel === 'parent' ? 'is-parent' : ''}`, rel);
-    if (rel === 'child' && b.event?.parent) relCell.title = `parent: ${b.event.parent}`;
+    if (isSpawn && b.spawning_agent_id) relCell.title = `spawned by: ${b.spawning_agent_id}`;
     row.appendChild(relCell);
 
     const prev = String(b.previous_hash ?? '');
     row.appendChild(el('span', 'hash prev',
-      prev === 'genesis' ? 'genesis' : `${prev.slice(0, 16)}…`));
-    const hashCell = el('span', 'hash', `${String(b.hash).slice(0, 16)}…`);
-    hashCell.title = String(b.hash);
+      prev === GENESIS ? 'genesis' : `${prev.slice(0, 16)}…`));
+    const hashCell = el('span', 'hash', `${String(b.entry_hash).slice(0, 16)}…`);
+    hashCell.title = String(b.entry_hash);
     row.appendChild(hashCell);
     list.appendChild(row);
-  }
+  });
   scroller.appendChild(list);
   container.appendChild(scroller);
 }
@@ -575,9 +589,12 @@ const CERT_SUBJECT_FOR_CODE = {
   ERR_MAX_SPAWNS: 'CHILD AGENT', ERR_MAX_CHILDREN: 'PARENT AGENT', ERR_CHILD_NOT_WHITELISTED: 'PARENT AGENT',
   ERR_SPAWN_NOT_PERMITTED: 'PARENT AGENT', ERR_OWNER_CERT_MISMATCH: 'CHILD AGENT', ERR_SINGLE_SIGNATURE: 'POLICY AUTHORITY',
   ERR_POLICY_EXCEEDS_TEMPLATE: 'CHILD AGENT', ERR_SPAWN_EXCEEDS_TEMPLATE: 'CHILD AGENT',
+  ERR_GRANT_ID_MISMATCH: 'CHILD AGENT', ERR_SPAWN_NOT_IN_POLICY: 'PARENT AGENT',
 };
 const CERT_FIELD_FOR_CODE = {
   ERR_KEY_TOO_SMALL: 'public_key', ERR_WEAK_SIGNATURE: 'sig_alg', ERR_SERIAL_ENTROPY: 'serial',
+  ERR_SERIAL_ENCODING: 'serial', ERR_EXTENSION_TOO_LARGE: 'template', ERR_MAX_CHILDREN_EXCEEDS_CAN_SPAWN: 'tpl:max_children',
+  ERR_GRANT_ID_MISMATCH: 'spawn:grant_id', ERR_SPAWN_NOT_IN_POLICY: 'tpl:policy_ref',
   ERR_CERT_EXPIRED: 'validity', ERR_VALIDITY_EXCEEDS_TTL: 'validity', ERR_TTL_TOO_LONG: 'tpl:ttl_seconds',
   ERR_SUBJECT_MISMATCH: 'subject', ERR_NAME_CONSTRAINT: 'subject', ERR_AGENT_ID_FORMAT: 'subject',
   ERR_FORGED_ISSUER: 'issuer', ERR_CHAIN_INVALID: 'issuer', ERR_SELF_SIGNED: 'issuer',
@@ -803,19 +820,29 @@ function showIssuanceRefusal(deny) {
  */
 const ALLOWED = [
   { phase: 'AUDIT', label: 'Reset the audit chain', section: '19.7', apply: async (d) => {
+      // Rebuilt from the certificates, not from the editor: the §10.4 spawn
+      // entry carries the nonce and grant the child's certificate attests.
       const child = childOf(d);
       const parent = parentOf(d);
+      const spawn = child ? spawnOf(child) : null;
       const chain = await seedAuditChain({
         parentId: parent?.metadata?.agent_id,
-        childId: child?.metadata?.agent_id,
+        childId: child?.metadata?.agent_id ?? null,
+        childScopes: child ? templateOf(child).allowed_scopes : [],
+        spawnNonce: spawn?.spawn_nonce ?? null,
+        grantId: spawn?.grant_id ?? null,
       });
       d.audit = chain.toJSON();
       return 'audit'; } },
   { phase: 'BOUNDS', label: 'Narrow the parent to read-only', section: '10.3', apply: async (d) => {
       // Re-issue the PARENT with a narrower ceiling. The child holds
       // read:events, so the delegation is still a subset. Narrowing is always
-      // permitted; only widening is refused.
-      await reissueThroughRegistry(d, parentOf(d), { allowed_scopes: ['read:events'] });
+      // permitted; only widening is refused. A re-certification retires the
+      // policy in force with it (§12.3 — policies are not inherited), so the
+      // parent's is re-stated within the new ceiling.
+      const p = parentOf(d);
+      await reissueThroughRegistry(d, p, { allowed_scopes: ['read:events'] });
+      await setInForcePolicy(d, p.metadata.agent_id, { scopes: ['read:events'] });
       return 'chain[1].cert_pem'; } },
   { phase: 'BOUNDS', label: 'Policy: revoke write access', section: '8.3', apply: async (d) => {
       // A dual-signed policy that REMOVES authority. Inside the ceiling, so it
@@ -858,21 +885,44 @@ const SABOTAGE = [
       delete attested.pa_sig;
       await registry.spawn({ attested, parent: templateOf(parentOf(d)) }); } },
   { phase: 'REGISTRY', label: 'Edit a template after it was signed', section: '9.3', registry: true, apply: async (d) => {
-      // Signed while conforming, edited afterwards. The edit is to a member the
-      // spawn checks of §10.2 never consult, so the only thing standing between
-      // it and a certificate is issuance re-verifying both signatures — which
-      // is why §9.3 re-verifies.
+      // Signed while conforming, edited afterwards. The edit is to a member
+      // that still conforms and that the spawn checks of §10.2 never consult,
+      // so the only thing standing between it and a certificate is issuance
+      // re-verifying both signatures — which is why §9.3 re-verifies.
       const registry = await Registry.fromDocument(d);
       const attested = await registry.attest(templateOf(childOf(d)));
-      attested.body.max_children = 99;
+      attested.body.ttl_seconds = 60;
       await registry.spawn({ attested, parent: templateOf(parentOf(d)) }); } },
   { phase: 'REGISTRY', label: 'Replay the spawn request', section: '19.2', registry: true, apply: async (d) => {
+      // The first request is REFUSED on purpose (a stale timestamp) and the
+      // replay is refused for its nonce anyway: a nonce is spent by being
+      // presented, not by being accepted (§19.2).
       const registry = await Registry.fromDocument(d);
       const attested = await registry.attest(templateOf(childOf(d)));
       const parent = templateOf(parentOf(d));
       const nonce = newNonce();
-      await registry.spawn({ attested, parent, nonce });   // accepted once
+      const stale = new Date(Date.now() - FRESHNESS_WINDOW_MS - 1000).toISOString();
+      try { await registry.spawn({ attested, parent, nonce, requestedAt: stale }); } catch { /* refused, and spent */ }
       await registry.spawn({ attested, parent, nonce }); } }, // the replay
+  { phase: 'REGISTRY', label: 'Policy withdraws the spawn target', section: '10.2', registry: true, apply: async (d) => {
+      // CanSpawn still names the child; the policy in force no longer does.
+      // Step 3 of §10.2 is what gives the fast lane authority over spawning:
+      // a target withdrawn by a dual-signed policy is refused without
+      // re-certification.
+      const registry = await Registry.fromDocument(d);
+      const parent = templateOf(parentOf(d));
+      const inForce = inForceOf(d, parent.subject)?.body;
+      await registry.adoptPolicy({ ...inForce, spawn_targets: [], version: (inForce?.version ?? 1) + 1 }, { template: parent });
+      await registry.spawn({ attested: await registry.attest(templateOf(childOf(d))), parent }); } },
+  { phase: 'REGISTRY', label: 'Exceed MaxChildren at the Registry', section: '10.2', registry: true, apply: async (d) => {
+      // The Registry holds the count (§10.2 step 5): the seed parent's
+      // MaxChildren is one, so the second spawn is refused by the party that
+      // actually enforces the cap — not by a document check.
+      const registry = await Registry.fromDocument(d);
+      const parent = templateOf(parentOf(d));
+      const attested = await registry.attest(templateOf(childOf(d)));
+      await registry.spawn({ attested, parent });   // the one child MaxChildren allows
+      await registry.spawn({ attested, parent }); } },
   { phase: 'REGISTRY', label: 'Stale spawn timestamp (61 s)', section: '19.2', registry: true, apply: async (d) => {
       const registry = await Registry.fromDocument(d);
       const attested = await registry.attest(templateOf(childOf(d)));
@@ -890,9 +940,9 @@ const SABOTAGE = [
       // issues the child. Well-formed, correctly signed — by the wrong authority.
       const rogue = await Registry.create({ caCommonName: 'Rogue-CA-Not-The-Trust-Anchor' });
       const c = childOf(d);
-      const issued = await rogue.spawn({
-        attested: await rogue.attest(templateOf(c)), parent: templateOf(parentOf(d)),
-      });
+      const parent = templateOf(parentOf(d));
+      await rogue.adoptPolicyFor(parent, { spawnTargets: [c.metadata.agent_id] });
+      const issued = await rogue.spawn({ attested: await rogue.attest(templateOf(c)), parent });
       c.cert_pem = issued.cert_pem; c.key_pem = issued.key_pem;
       return 'chain[2].cert_pem'; } },
   { phase: 'IDENTITY', label: 'Corrupt the certificate', section: '7', apply: (d) => {
@@ -922,6 +972,19 @@ const SABOTAGE = [
       return 'chain[2].cert_pem'; } },
   { phase: 'IDENTITY', label: 'Drop the revocation pointer', section: '14.4', apply: async (d) => {
       await issueRaw(d, childOf(d), { revocationSource: false });
+      return 'chain[2].cert_pem'; } },
+  { phase: 'IDENTITY', label: 'Non-minimal serial number', section: '7.1', apply: async (d) => {
+      // A leading zero octet the next octet does not need: the encoding a
+      // careless issuer emits one draw in 256 by clearing the top bit, and
+      // one a strict DER parser refuses.
+      const octets = new Uint8Array(20); crypto.getRandomValues(octets); octets[0] = 0x00; octets[1] &= 0x7f;
+      await issueRaw(d, childOf(d), { serialOctets: octets });
+      return 'chain[2].cert_pem'; } },
+  { phase: 'IDENTITY', label: 'Oversized template extension', section: '8.2', apply: async (d) => {
+      // A relying party imposes the limit on the octets and never parses
+      // what exceeds it. This extension is well-formed JCS — the point is
+      // that nobody finds that out.
+      await issueRaw(d, childOf(d), { template: { policy_ref: `policy-store/${'x'.repeat(17000)}/current` } });
       return 'chain[2].cert_pem'; } },
   { phase: 'IDENTITY', label: 'One identity, two certificates', section: '12.1', apply: (d) => {
       const c = childOf(d);
@@ -962,6 +1025,24 @@ const SABOTAGE = [
   { phase: 'GRANT', label: 'Grant allows no spawns', section: '13.2', apply: async (d) => {
       await spawnAcrossOrganizations(d, { max_spawns: 0 });
       return 'grant.body.max_spawns'; } },
+  { phase: 'GRANT', label: 'Revoke the grant', section: '13.4', apply: async (d) => {
+      // The Grantor's Registry revokes every unexpired certificate carrying
+      // the grant's id (§13.4), and a relying party learns of it through the
+      // revocation state the certificate already points to.
+      await spawnAcrossOrganizations(d);
+      const revokedGrant = d.grant.body.grant_id;
+      for (const n of d.chain) {
+        if (n.role === 'agent' && spawnOf(n)?.grant_id === revokedGrant) d.crl.revoked.push(n.metadata.agent_id);
+      }
+      return 'crl.revoked'; } },
+  { phase: 'GRANT', label: 'Certificate omits the grant it was issued under', section: '10.5', apply: async (d) => {
+      // A cross-organizational child whose Agent Spawn extension names no
+      // grant: nothing ties it to the grant, so §13.4 could never reach it.
+      await spawnAcrossOrganizations(d);
+      const c = childOf(d);
+      const { grant_id: _dropped, ...spawn } = spawnOf(c);
+      await issueRaw(d, c, { spawn });
+      return 'chain[2].cert_pem'; } },
 
   // ── BOUNDS ───────────────────────────────────────────────────────────────
   { phase: 'BOUNDS', label: 'Escalate the scope', section: '10.3', apply: async (d) => {
@@ -970,18 +1051,36 @@ const SABOTAGE = [
       const c = childOf(d);
       await issueRaw(d, c, { template: { allowed_scopes: ['admin:all'] } });
       c.requested_scopes = ['admin:all'];
-      delete d.policy;          // isolate §10.3 from the §8.3 ceiling
+      delete d.policy;                                   // isolate §10.3 from the §8.3 ceiling...
+      dropInForcePolicy(d, c.metadata.agent_id);        // ...which the policy in force would also trip
       return 'chain[2].cert_pem'; } },
   { phase: 'BOUNDS', label: 'Exceed max_children', section: '10.2', apply: async (d) => {
       await issueRaw(d, parentOf(d), { template: { max_children: 0 } });
       return 'chain[1].cert_pem'; } },
   { phase: 'BOUNDS', label: 'Spawn a non-whitelisted child', section: '10.1', apply: async (d) => {
-      await issueRaw(d, parentOf(d), { template: { can_spawn: [] } });
+      // An empty CanSpawn with a cap of zero — §8.1 permits nothing else —
+      // and a policy in force re-stated within it, so that §10.1 is what
+      // refuses rather than §8.3.
+      const p = parentOf(d);
+      await issueRaw(d, p, { template: { can_spawn: [], max_children: 0 } });
+      await setInForcePolicy(d, p.metadata.agent_id, { spawn_targets: [] });
       return 'chain[1].cert_pem'; } },
   { phase: 'BOUNDS', label: 'Parent may not spawn at all', section: '10.1', apply: async (d) => {
       // CanSpawn still names the child; PermittedOperations omits spawn. §8.1
       // calls that "permitted to spawn specific children and not permitted to spawn".
       await issueRaw(d, parentOf(d), { template: { permitted_operations: ['read', 'write'] } });
+      return 'chain[1].cert_pem'; } },
+  { phase: 'BOUNDS', label: 'Policy in force omits the child', section: '10.2', apply: async (d) => {
+      // Dual-signed, current, within the ceiling — and it names no spawn
+      // target. The document then says the Registry could not have passed
+      // step 3 for the child it carries.
+      await setInForcePolicy(d, parentOf(d).metadata.agent_id, { spawn_targets: [] });
+      return 'policies'; } },
+  { phase: 'BOUNDS', label: 'MaxChildren above CanSpawn', section: '8.1', apply: async (d) => {
+      // A template defines one agent, so a cap above the number of children
+      // it names is a cap on nothing (§8.1). The CA key issues it; the
+      // relying party refuses the certificate.
+      await issueRaw(d, parentOf(d), { template: { max_children: 5 } });
       return 'chain[1].cert_pem'; } },
   { phase: 'BOUNDS', label: 'Widen policy past the ceiling', section: '8.3', apply: async (d) => {
       // Both authorities legitimately sign, the hash matches, the owner is
@@ -1033,7 +1132,7 @@ const SABOTAGE = [
       // Idempotent on purpose: a fixed value, so pressing it twice leaves the
       // chain exactly as broken as it already was.
       const entry = d.audit.chain[0];
-      entry.event.detail = 'record altered after the block was sealed';
+      entry.detail = 'record altered after the entry was sealed';
       return 'audit'; } },
 ];
 
@@ -1181,8 +1280,14 @@ function buildControls() {
     const refused = SABOTAGE.filter((e) => e.phase === phase.name);
     if (!allowed.length && !advisory.length && !refused.length) continue;
 
-    const group = el('div', 'phase-group');
-    const head = el('div', 'phase-head');
+    // A native <details> disclosure. No click handler, no toggle state to
+    // track — the browser does both, and it's keyboard- and screen-reader-
+    // accessible for free. Only the first group (IDENTITY) opens by default;
+    // the rest start folded so the page reads short, one click away from any
+    // category.
+    const group = el('details', 'phase-group disclosure');
+    group.open = phase === PHASES[0];
+    const head = el('summary', 'phase-head disclosure-summary');
     head.appendChild(el('span', 'phase-name', phase.name));
     head.appendChild(el('span', 'phase-ask', phase.asks));
     group.appendChild(head);

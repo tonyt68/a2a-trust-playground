@@ -113,6 +113,8 @@ const EXPECTED = {
   'Agent cert claims keyCertSign': 'ERR_KEY_USAGE',
   'Outlive the template TTL': 'ERR_VALIDITY_EXCEEDS_TTL',
   'Drop the revocation pointer': 'ERR_NO_REVOCATION_SOURCE',
+  'Non-minimal serial number': 'ERR_SERIAL_ENCODING',
+  'Oversized template extension': 'ERR_EXTENSION_TOO_LARGE',
   'One identity, two certificates': 'ERR_DUPLICATE_SUBJECT',
   'Duplicate nonce in the chain': 'ERR_NONCE_REUSED',
   'Revoke the parent': 'ERR_AGENT_REVOKED',
@@ -123,10 +125,14 @@ const EXPECTED = {
   'Remove one grant signature': 'ERR_GRANT_INVALID',
   'Drop the grant’s issued_at': 'ERR_GRANT_INVALID',
   'Grant allows no spawns': 'ERR_MAX_SPAWNS',
+  'Revoke the grant': 'ERR_AGENT_REVOKED',
+  'Certificate omits the grant it was issued under': 'ERR_GRANT_ID_MISMATCH',
   'Escalate the scope': 'ERR_SCOPE_ESCALATION',
   'Exceed max_children': 'ERR_MAX_CHILDREN',
   'Spawn a non-whitelisted child': 'ERR_CHILD_NOT_WHITELISTED',
   'Parent may not spawn at all': 'ERR_SPAWN_NOT_PERMITTED',
+  'Policy in force omits the child': 'ERR_SPAWN_NOT_IN_POLICY',
+  'MaxChildren above CanSpawn': 'ERR_MAX_CHILDREN_EXCEEDS_CAN_SPAWN',
   'Widen policy past the ceiling': 'ERR_POLICY_EXCEEDS_TEMPLATE',
   'Sign with one key only': 'ERR_PA_SIG_MISSING',
   'One key, both roles': 'ERR_SINGLE_SIGNATURE',
@@ -160,6 +166,8 @@ const ISSUANCE = {
   'Remove one attestation signature': 'ERR_TEMPLATE_SIGNATURE',
   'Edit a template after it was signed': 'ERR_TEMPLATE_SIGNATURE',
   'Replay the spawn request': 'ERR_NONCE_REUSED',
+  'Policy withdraws the spawn target': 'ERR_SPAWN_NOT_IN_POLICY',
+  'Exceed MaxChildren at the Registry': 'ERR_MAX_CHILDREN',
   'Stale spawn timestamp (61 s)': 'ERR_SPAWN_STALE',
   'Future spawn timestamp (61 s)': 'ERR_SPAWN_STALE',
 };
@@ -349,7 +357,7 @@ for (const payload of XSS) {
   await page.evaluate((p) => {
     const box = document.getElementById('doc');
     const d = JSON.parse(box.value);
-    d.audit.chain[0].event.detail = p;
+    d.audit.chain[0].detail = p;
     d.policy.body.owner = p;
     box.value = JSON.stringify(d, null, 2);
     box.dispatchEvent(new Event('input', { bubbles: true }));

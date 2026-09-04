@@ -19,13 +19,14 @@ if (result.verdict !== 'PASS') {
 }
 
 // The export carries the pipeline result PLUS the fields Python needs: private
-// keys, the policy envelope and the Registry's version in force, which the
-// display-oriented result does not repeat.
+// keys, the policy envelope, the policies in force and the Registry's version
+// in force, which the display-oriented result does not repeat.
 const out = {
   ...result,
   chain: document.chain,
   authorities: document.authorities,
   policy: document.policy,
+  policies: document.policies,
   current_policy_version: document.current_policy_version,
   crl: document.crl,
 };

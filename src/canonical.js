@@ -40,10 +40,24 @@ export const TEMPLATE_FIELDS = Object.freeze([
   'can_spawn', 'max_children', 'policy_ref', 'ttl_seconds',
 ]);
 
-/** §10.5 Table 6 — the Agent Spawn extension. All REQUIRED when present. */
+/** §10.5 Table 7 — the Agent Spawn extension: the three members REQUIRED whenever it is present... */
 export const SPAWN_FIELDS = Object.freeze(['parent_agent_id', 'spawned_at', 'spawn_nonce']);
+/** ...and the one present exactly when the spawn was cross-organizational (§10.5, §13.4). */
+export const SPAWN_OPTIONAL_FIELDS = Object.freeze(['grant_id']);
 
-/** §11.4 Table 7 — the dynamic policy document. */
+/**
+ * §10.4 Table 6 — the audit log entry for a spawn event. `previous_hash` and
+ * `entry_hash` are members of the entry, not chain metadata around it: §19.7
+ * hashes every member but entry_hash, previous_hash included.
+ */
+export const AUDIT_SPAWN_FIELDS = Object.freeze([
+  'spawning_agent_id', 'child_template_id', 'requested_scopes', 'granted_scopes', 'spawn_nonce',
+  'timestamp', 'outcome', 'previous_hash', 'entry_hash',
+]);
+/** Present under a condition: grant_id when spawned under a grant, reason when DENIED. */
+export const AUDIT_SPAWN_OPTIONAL_FIELDS = Object.freeze(['grant_id', 'reason']);
+
+/** §11.4 Table 8 — the dynamic policy document. */
 export const POLICY_FIELDS = Object.freeze([
   'subject', 'owner', 'org_id', 'scopes', 'spawn_targets', 'version', 'issued_at', 'not_after',
 ]);
@@ -51,9 +65,9 @@ export const REQUIRED_POLICY_FIELDS = Object.freeze([
   'subject', 'owner', 'org_id', 'scopes', 'version', 'issued_at',
 ]);
 
-/** §13.2 Table 10 — the cross-organizational grant. All REQUIRED. */
+/** §13.2 Table 11 — the cross-organizational grant. All REQUIRED. */
 export const GRANT_FIELDS = Object.freeze([
-  'grantor', 'grantee', 'template', 'allowed_scopes', 'issued_at', 'ttl_seconds', 'max_spawns',
+  'grant_id', 'grantor', 'grantee', 'template', 'allowed_scopes', 'issued_at', 'ttl_seconds', 'max_spawns',
 ]);
 
 /** §3.1 Table 1 — the envelope. `content_hash` is present only where §11.6 requires it. */

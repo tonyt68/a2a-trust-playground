@@ -8,8 +8,8 @@
  *
  * Two layers of issuance are deliberately visible here:
  *
- *   reissueThroughRegistry   the Registry's gates (§9.1, §9.2, §9.3, §10.1,
- *                            §19.2) — what a correct CA does
+ *   reissueThroughRegistry   the Registry's gates (§9.1, §9.2, §9.3, the six
+ *                            steps of §10.2, §19.2) — what a correct CA does
  *   issueRaw                 the CA key with no gate — what a compromised or
  *                            careless CA does, and what the relying party's
  *                            checks exist to catch
@@ -27,18 +27,49 @@ export const parentOf = (d) => agentsOf(d).find((n) => !n.metadata?.parent_agent
 export const templateOf = (node) => parseTemplateExtension(parseCertificate(node.cert_pem));
 export const spawnOf = (node) => parseSpawnExtension(parseCertificate(node.cert_pem));
 
+/** The policy the document says is in force for a subject (§11.4), or null. */
+export const inForceOf = (d, subject) => (d.policies ?? []).find((p) => p?.body?.subject === subject) ?? null;
+
+async function authorityKeys(d) {
+  return {
+    ownerKey: await privateKeyFromPem(d.authorities.owner.key_pem),
+    paKey: await privateKeyFromPem(d.authorities.pa.key_pem),
+  };
+}
+
+/**
+ * Re-state the policy in force for a subject with some members changed, signed
+ * by both authorities. The Registry's store and the document's `policies` are
+ * the same thing seen from two sides, so the page edits it here.
+ */
+export async function setInForcePolicy(d, subject, changes = {}) {
+  const { ownerKey, paKey } = await authorityKeys(d);
+  const current = inForceOf(d, subject);
+  const body = { ...(current?.body ?? {}), ...changes, subject };
+  const envelope = await signEnvelope(body, ownerKey, paKey, { withHash: true });
+  d.policies = (d.policies ?? []).filter((p) => p?.body?.subject !== subject);
+  d.policies.push(envelope);
+  return envelope;
+}
+
+/** Remove the policy in force for a subject — what a store does when a template version is retired (§12.3). */
+export function dropInForcePolicy(d, subject) {
+  d.policies = (d.policies ?? []).filter((p) => p?.body?.subject !== subject);
+}
+
 /**
  * Re-issue an agent through the Registry the document carries, with a changed
  * template. Fresh keys, same identity — identity is the UUID, not the key. A
- * child is re-spawned, so it gets a fresh spawn nonce and timestamp.
+ * child is re-spawned, so it gets a fresh spawn nonce and timestamp, and a
+ * cross-organizational child is re-spawned under the grant it is handed.
  */
-export async function reissueThroughRegistry(d, node, changes = {}, { now = new Date() } = {}) {
+export async function reissueThroughRegistry(d, node, changes = {}, { now = new Date(), grant = null } = {}) {
   const registry = await Registry.fromDocument(d, { now });
   const template = { ...templateOf(node), ...changes };
   const attested = await registry.attest(template);
   const parentId = node.metadata?.parent_agent_id ?? null;
   const issued = parentId
-    ? await registry.spawn({ attested, parent: templateOf(parentOf(d)), now })
+    ? await registry.spawn({ attested, parent: templateOf(parentOf(d)), now, grant })
     : await registry.issue(attested, { now });
   node.cert_pem = issued.cert_pem;
   node.key_pem = issued.key_pem;
@@ -57,6 +88,7 @@ export async function reissueThroughRegistry(d, node, changes = {}, { now = new 
  * @param {Date}   [opts.notAfter]
  * @param {number[]} [opts.keyUsageBits]
  * @param {number} [opts.serialBytes]
+ * @param {Uint8Array} [opts.serialOctets]
  * @param {boolean} [opts.revocationSource]
  * @param {boolean} [opts.criticalExtensions]
  */
@@ -70,7 +102,8 @@ export async function issueRaw(d, node, { template = {}, spawn = undefined, ...o
     notBefore: now, notAfter: opts.notAfter ?? new Date(now.getTime() + merged.ttl_seconds * 1000),
     template: merged,
     spawn: spawn === undefined ? spawnOf(node) : spawn,
-    keyUsageBits: opts.keyUsageBits ?? null, serialBytes: opts.serialBytes ?? 20,
+    keyUsageBits: opts.keyUsageBits ?? null, serialBytes: opts.serialBytes ?? 19,
+    serialOctets: opts.serialOctets ?? null,
     revocationSource: opts.revocationSource ?? true,
     criticalExtensions: opts.criticalExtensions ?? true,
   });
@@ -81,23 +114,28 @@ export async function issueRaw(d, node, { template = {}, spawn = undefined, ...o
 
 /** Re-sign the policy envelope after editing its body, with both authority keys. */
 export async function resignPolicy(d) {
-  const ownerKey = await privateKeyFromPem(d.authorities.owner.key_pem);
-  const paKey = await privateKeyFromPem(d.authorities.pa.key_pem);
+  const { ownerKey, paKey } = await authorityKeys(d);
   d.policy = await signEnvelope(d.policy.body, ownerKey, paKey, { withHash: true });
 }
 
 /**
  * Move the child to a partner organization and issue the grant that permits
- * the spawn (§13). The same Owner and Policy Authority sign for both
- * organizations here, which is the "federated CA" option of §13.3: both trust
- * one root, and this page holds every key.
+ * the spawn (§13). The grant is issued FIRST, because the Registry requires it
+ * at spawn time (§10.2 step 2) and records its grant_id in the child's
+ * certificate (§10.5); `grantChanges` are then applied to the grant AFTER
+ * issuance and validly re-signed, so what the relying party sees is a grant
+ * that was tampered with — or expired, or narrowed — since the spawn.
+ *
+ * The same Owner and Policy Authority sign for both organizations here, which
+ * is the "federated CA" option of §13.3: both trust one root, and this page
+ * holds every key.
  */
 export async function spawnAcrossOrganizations(d, grantChanges = {}, { now = new Date() } = {}) {
   const c = childOf(d);
   const p = parentOf(d);
-  await reissueThroughRegistry(d, c, { org_id: 'partner-org' }, { now });
-  const childT = templateOf(c);
+  const childT = { ...templateOf(c), org_id: 'partner-org' };
   const grantBody = {
+    grant_id: newAgentId(),
     grantor: 'partner-org',
     grantee: templateOf(p).org_id,
     template: childT.subject,
@@ -105,21 +143,24 @@ export async function spawnAcrossOrganizations(d, grantChanges = {}, { now = new
     issued_at: now.toISOString(),
     ttl_seconds: 3600,
     max_spawns: 3,
-    ...grantChanges,
   };
-  const ownerKey = await privateKeyFromPem(d.authorities.owner.key_pem);
-  const paKey = await privateKeyFromPem(d.authorities.pa.key_pem);
+  const { ownerKey, paKey } = await authorityKeys(d);
   d.grant = await signEnvelope(grantBody, ownerKey, paKey);
+  await reissueThroughRegistry(d, c, { org_id: 'partner-org' }, { now, grant: d.grant });
+  if (Object.keys(grantChanges).length) {
+    d.grant = await signEnvelope({ ...grantBody, ...grantChanges }, ownerKey, paKey);
+  }
   if (d.policy?.body) {
     d.policy.body.org_id = 'partner-org';
     await resignPolicy(d);
   }
+  if (inForceOf(d, childT.subject)) await setInForcePolicy(d, childT.subject, { org_id: 'partner-org' });
   return d.grant;
 }
 
 /**
  * A second child issued under the FIRST child's nonce, with the CA key. The
- * relying party refuses the chain (§10.5: the Registry issues each nonce once).
+ * relying party refuses the chain (§10.5: the Registry accepts each nonce once).
  */
 export async function issueSecondChildWithNonce(d) {
   const c = childOf(d);

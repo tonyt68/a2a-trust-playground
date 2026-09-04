@@ -21,7 +21,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { runPipeline } from '../src/pipeline.js';
 import { parseDocument } from '../src/validate-input.js';
 import { buildDefaultDocument } from '../src/defaults.js';
-import { childOf, parentOf, issueRaw } from '../src/scenarios.js';
+import { childOf, parentOf, spawnOf, issueRaw } from '../src/scenarios.js';
 import { DenyError } from '../src/errors.js';
 
 let base, now;
@@ -92,9 +92,11 @@ const ATTACKS = [
     mutate: async (d) => { await issueRaw(d, childOf(d), { template: { subject: parentOf(d).metadata.agent_id } }); } },
   { name: 'a template with a 65-character scope', expect: 'ERR_SCOPE_SYNTAX',
     mutate: async (d) => { await issueRaw(d, childOf(d), { template: { allowed_scopes: ['a'.repeat(65)] } }); } },
-  { name: 'a template extension over the size limit is refused before it is parsed (§8.2)', expect: 'ERR_TEMPLATE_EXT_INVALID',
-    mutate: async (d) => { await issueRaw(d, childOf(d), { template: { can_spawn: Array.from({ length: 120 }, (_, i) =>
+  { name: 'a template extension over the 16384-octet limit is refused before it is parsed (§8.2)', expect: 'ERR_EXTENSION_TOO_LARGE',
+    mutate: async (d) => { await issueRaw(d, childOf(d), { template: { can_spawn: Array.from({ length: 450 }, (_, i) =>
       `019b3c8e-2f10-7a4b-9c6d-3e5f7a9b${String(i).padStart(4, '0')}`) } }); } },
+  { name: 'an Agent Spawn extension over the 1024-octet limit is refused before it is parsed (§8.2)', expect: 'ERR_EXTENSION_TOO_LARGE',
+    mutate: async (d) => { await issueRaw(d, childOf(d), { spawn: { ...spawnOf(childOf(d)), spawn_nonce: 'A'.repeat(2000) } }); } },
   { name: 'a certificate over the PEM cap is refused before any parser sees it', expect: 'ERR_MALFORMED_PEM',
     mutate: async (d) => { await issueRaw(d, childOf(d), { template: { allowed_scopes: ['a'.repeat(100000)] } }); } },
   { name: 'a template with a nested member', expect: 'ERR_OBJECT_NOT_FLAT',
@@ -152,7 +154,7 @@ const ATTACKS = [
 
   // ── Audit forgery ─────────────────────────────────────────────────────────
   { name: 'forged audit entry with a made-up hash', expect: 'ERR_AUDIT_CHAIN_BROKEN',
-    mutate: (d) => { d.audit = { chain: [{ index: 0, timestamp: 't', previous_hash: 'genesis', event: { decision: 'ALLOWED' }, hash: '0'.repeat(64) }] }; } },
+    mutate: (d) => { d.audit = { chain: [{ timestamp: '2026-09-04T00:00:00Z', previous_hash: '0'.repeat(64), action: 'x', outcome: 'ALLOWED', entry_hash: '0'.repeat(64) }] }; } },
   { name: 'an audit entry removed from the middle', expect: 'ERR_AUDIT_CHAIN_BROKEN',
     mutate: (d) => { d.audit.chain.splice(1, 1); } },
 

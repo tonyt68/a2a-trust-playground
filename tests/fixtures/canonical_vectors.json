@@ -192,14 +192,14 @@
       "can_spawn": [
         "c669186f-a84b-4d7a-81f3-05880df87114"
       ],
-      "max_children": 2,
+      "max_children": 1,
       "policy_ref": "policy-store/8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa/current",
       "ttl_seconds": 86400
     },
-    "expected": "{\"allowed_scopes\":[\"read:events\",\"write:events\"],\"can_spawn\":[\"c669186f-a84b-4d7a-81f3-05880df87114\"],\"max_children\":2,\"org_id\":\"playground-org\",\"owner\":\"owner-authority\",\"permitted_operations\":[\"spawn\",\"read\"],\"policy_ref\":\"policy-store/8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa/current\",\"subject\":\"8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa\",\"ttl_seconds\":86400}"
+    "expected": "{\"allowed_scopes\":[\"read:events\",\"write:events\"],\"can_spawn\":[\"c669186f-a84b-4d7a-81f3-05880df87114\"],\"max_children\":1,\"org_id\":\"playground-org\",\"owner\":\"owner-authority\",\"permitted_operations\":[\"spawn\",\"read\"],\"policy_ref\":\"policy-store/8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa/current\",\"subject\":\"8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa\",\"ttl_seconds\":86400}"
   },
   {
-    "name": "an Agent Spawn extension body (§10.5 Table 6)",
+    "name": "an Agent Spawn extension body (§10.5 Table 7)",
     "source": "python-differential",
     "value": {
       "parent_agent_id": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
@@ -209,9 +209,21 @@
     "expected": "{\"parent_agent_id\":\"8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa\",\"spawn_nonce\":\"AAAAAAAAAAAAAAAAAAAAAA==\",\"spawned_at\":\"2026-09-03T00:00:00Z\"}"
   },
   {
-    "name": "a cross-organizational grant body (§13.2 Table 10)",
+    "name": "an Agent Spawn extension body of a cross-organizational spawn (§10.5, grant_id)",
     "source": "python-differential",
     "value": {
+      "parent_agent_id": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
+      "spawned_at": "2026-09-03T00:00:00Z",
+      "spawn_nonce": "AAAAAAAAAAAAAAAAAAAAAA==",
+      "grant_id": "019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d"
+    },
+    "expected": "{\"grant_id\":\"019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d\",\"parent_agent_id\":\"8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa\",\"spawn_nonce\":\"AAAAAAAAAAAAAAAAAAAAAA==\",\"spawned_at\":\"2026-09-03T00:00:00Z\"}"
+  },
+  {
+    "name": "a cross-organizational grant body (§13.2 Table 11)",
+    "source": "python-differential",
+    "value": {
+      "grant_id": "019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d",
       "grantor": "partner-org",
       "grantee": "playground-org",
       "template": "c669186f-a84b-4d7a-81f3-05880df87114",
@@ -222,18 +234,26 @@
       "ttl_seconds": 3600,
       "max_spawns": 3
     },
-    "expected": "{\"allowed_scopes\":[\"read:events\"],\"grantee\":\"playground-org\",\"grantor\":\"partner-org\",\"issued_at\":\"2026-09-03T00:00:00.000Z\",\"max_spawns\":3,\"template\":\"c669186f-a84b-4d7a-81f3-05880df87114\",\"ttl_seconds\":3600}"
+    "expected": "{\"allowed_scopes\":[\"read:events\"],\"grant_id\":\"019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d\",\"grantee\":\"playground-org\",\"grantor\":\"partner-org\",\"issued_at\":\"2026-09-03T00:00:00.000Z\",\"max_spawns\":3,\"template\":\"c669186f-a84b-4d7a-81f3-05880df87114\",\"ttl_seconds\":3600}"
   },
   {
-    "name": "an audit chain entry",
+    "name": "an audit log entry for a spawn, as hashed (§10.4 Table 6, §19.7)",
     "source": "python-differential",
     "value": {
-      "index": 0,
-      "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-      "decision": "ALLOWED",
-      "timestamp": "2026-09-03T00:00:00.000Z"
+      "spawning_agent_id": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
+      "child_template_id": "c669186f-a84b-4d7a-81f3-05880df87114",
+      "requested_scopes": [
+        "read:events"
+      ],
+      "granted_scopes": [
+        "read:events"
+      ],
+      "spawn_nonce": "AAAAAAAAAAAAAAAAAAAAAA==",
+      "timestamp": "2026-09-04T00:00:00.000Z",
+      "outcome": "ALLOWED",
+      "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000"
     },
-    "expected": "{\"decision\":\"ALLOWED\",\"index\":0,\"previous_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"timestamp\":\"2026-09-03T00:00:00.000Z\"}"
+    "expected": "{\"child_template_id\":\"c669186f-a84b-4d7a-81f3-05880df87114\",\"granted_scopes\":[\"read:events\"],\"outcome\":\"ALLOWED\",\"previous_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"requested_scopes\":[\"read:events\"],\"spawn_nonce\":\"AAAAAAAAAAAAAAAAAAAAAA==\",\"spawning_agent_id\":\"8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa\",\"timestamp\":\"2026-09-04T00:00:00.000Z\"}"
   },
   {
     "name": "unicode in ordinary values",

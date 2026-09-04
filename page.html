@@ -54,9 +54,9 @@
      output, and reads as such. */
   --mono-bg:#10131a; --mono-text:#e6e9ef; --mono-dim:#7d8595; --mono-border:#242a35;
 
-  --green:#0b3d2e; --green-line:#2e7d5b; --green-text:#1f9d63;
-  --red:#3d1a1a;   --red-line:#a13d3d;   --red-text:#d8524f;
-  --amber-line:#b8860b; --amber-text:#b8860b;
+  --green:#0b3d2e; --green-line:#2e7d5b; --green-text:#1b8a57;
+  --red:#3d1a1a;   --red-line:#a13d3d;   --red-text:#be4846;
+  --amber-line:#b8860b; --amber-text:#a2760a;
   --idle-line:#9aa1ab;  --idle-text:#9aa1ab;
   --accent:#3b82f6; --accent-2:#a855f7; --teal:#14b8a6;
 
@@ -156,12 +156,33 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);
 .admin-btn.ok .sec-tag{color:var(--green-text);opacity:.8}
 
 /* A lede under the section title, rather than a legend floating at the far
-   right where it reads as unrelated to the buttons it describes. */
+   right where it reads as unrelated to the buttons it describes. Full panel
+   width, not a narrow prose column — this is a legend to scan, not an essay
+   to read start to finish. */
 .section-lede{font-size:12.5px;line-height:1.65;color:var(--text-dim);
-  margin:-2px 0 12px;max-width:96ch}
+  margin:-2px 0 10px}
 .section-lede b{font-weight:700}
+.lede-legend{display:flex;flex-wrap:wrap;gap:8px 22px;list-style:none;
+  margin:0 0 12px;padding:10px 12px;border:1px solid var(--border);
+  border-radius:6px;background:color-mix(in srgb,var(--idle-line) 6%,transparent)}
+.lede-legend li{font-size:12.5px;line-height:1.5;color:var(--text-dim);
+  display:flex;align-items:baseline;gap:6px;flex:1 1 240px}
+.lede-legend b{font-weight:700;white-space:nowrap}
 
-/* ── Phase-grouped controls ─────────────────────────────────────────────── */
+/* ── Disclosure — a collapsible <details>/<summary> pair, generic ──────────
+   Two classes, reusable anywhere a section needs to fold away: `.disclosure`
+   on the <details>, `.disclosure-summary` on its <summary>. Layout, color and
+   spacing stay with the section's OWN class, applied alongside these — this
+   pair only owns the open/closed arrow and the border-on-close cleanup. */
+.disclosure:not([open]) .disclosure-summary{border-bottom:none}
+.disclosure-summary{cursor:pointer;list-style:none}
+.disclosure-summary::-webkit-details-marker{display:none}
+.disclosure-summary::before{content:'▶';display:inline-block;font-size:15px;
+  line-height:1;color:var(--text);margin-right:2px;transition:transform .12s;
+  transform-origin:40% 50%}
+.disclosure[open] .disclosure-summary::before{transform:rotate(90deg)}
+
+/* ── Phase-grouped controls — one disclosure per phase ─────────────────── */
 #controls-phases{display:flex;flex-direction:column;gap:12px;margin-top:4px}
 .phase-group{border:1px solid var(--border);border-radius:6px;overflow:hidden}
 .phase-head{display:flex;align-items:baseline;gap:10px;padding:7px 11px;
@@ -624,12 +645,15 @@ footer a{-webkit-text-fill-color:var(--accent);color:var(--accent);
 
   <div class="panel">
     <div class="panel-title"><span>TRY IT</span></div>
-    <p class="section-lede">Each button edits the document, jumps to the line it changed,
-      then re-validates. <b class="k-ok">Green</b> makes a change the draft permits &mdash; the
-      chain stays valid. <b class="k-warn">Amber</b> trips a SHOULD: reported, not refused.
-      <b class="k-no">Red</b> makes a change it refuses, and the result names the clause. The
-      REGISTRY group asks the Registry to mint something it must not; nothing is issued and the
-      document is untouched. Grouped by the step of the chain each one exercises.</p>
+    <p class="section-lede">Each button edits the document, jumps to the line it changed, then
+      re-validates &mdash; grouped by the step of the chain each one exercises.</p>
+    <ul class="lede-legend">
+      <li><b class="k-ok">Green</b> a change the draft permits &mdash; the chain stays valid</li>
+      <li><b class="k-warn">Amber</b> trips a SHOULD &mdash; reported, not refused</li>
+      <li><b class="k-no">Red</b> a change the draft refuses &mdash; the result names the clause</li>
+      <li><b>REGISTRY</b> asks the Registry to mint something it must not &mdash; nothing is
+        issued, the document stays untouched</li>
+    </ul>
     <div id="controls-phases"></div>
   </div>
 

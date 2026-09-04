@@ -12,7 +12,7 @@ import * as asn1js from 'asn1js';
 import { Certificate, Extension } from 'pkijs';
 import {
   parseCertificate, subjectCN, issuerCN, isSelfSigned, publicKeyInfo, validateCertificate, validateAnchor,
-  parseTemplateExtension, parseSpawnExtension, assertValidityWithinTtl, assertSerialEntropy,
+  parseTemplateExtension, parseSpawnExtension, assertValidityWithinTtl, assertSerialEntropy, assertSerialEncoding,
   normalizeOid, spkiHex, TEMPLATE_EXT_OID, SPAWN_EXT_OID, MIN_RSA_BITS,
 } from '../src/x509.js';
 import { issueCertificate, generateKeyPair, toPem, DEMO_NOTICE_OID } from '../src/mint.js';
@@ -485,10 +485,11 @@ describe('refusal branches the fixture set does not reach', () => {
       spy.mockRestore();
       const cert = parseCertificate(pem);
       const bytes = new Uint8Array(cert.serialNumber.valueBlock.valueHexView);
-      expect(bytes.length).toBe(21);            // 20 requested octets, plus the one pad byte
+      expect(bytes.length).toBe(20);            // 19 drawn octets plus the pad: exactly RFC 5280's limit
       expect(bytes[0]).toBe(0x00);               // the pad — DER's ONLY legal reason for it
       expect(bytes[1]).toBe(0x80);               // the drawn octet, unmodified: no entropy spent
       expect(() => assertSerialEntropy(cert)).not.toThrow();   // still well over the 64-bit floor
+      expect(() => assertSerialEncoding(cert)).not.toThrow();
     });
     it('does not pad when the top bit is already clear', async () => {
       const spy = vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementationOnce((arr) => {
@@ -498,8 +499,37 @@ describe('refusal branches the fixture set does not reach', () => {
       const pem = await mint();
       spy.mockRestore();
       const bytes = new Uint8Array(parseCertificate(pem).serialNumber.valueBlock.valueHexView);
-      expect(bytes.length).toBe(20);
+      expect(bytes.length).toBe(19);
       expect(bytes[0]).toBe(0x7f);
+    });
+    it('strips leading zero octets the draw produced, so the encoding stays minimal (§7.1)', async () => {
+      const spy = vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementationOnce((arr) => {
+        arr.fill(0x42); arr[0] = 0x00; arr[1] = 0x00; arr[2] = 0x7f;
+        return arr;
+      });
+      const pem = await mint();
+      spy.mockRestore();
+      const cert = parseCertificate(pem);
+      const bytes = new Uint8Array(cert.serialNumber.valueBlock.valueHexView);
+      expect(bytes.length).toBe(17);
+      expect(bytes[0]).toBe(0x7f);
+      expect(() => assertSerialEncoding(cert)).not.toThrow();
+    });
+    it('the relying party refuses a non-minimal, a negative, and an over-long serial (§7.1)', async () => {
+      const issuer = { commonName: 'A2A-Trust-Playground-CA', privateKey: await privateKeyFromPem(read('ca-root.key')) };
+      const keys = await generateKeyPair();
+      const base = parseTemplateExtension(parseCertificate(read('agent-a.crt')));
+      const now = new Date();
+      const withSerial = async (octets) => issueCertificate({ commonName: A, subjectPublicKey: keys.publicKey, issuer,
+        notBefore: now, notAfter: new Date(now.getTime() + 1000), template: base, serialOctets: octets });
+      const nonMinimal = await withSerial(Uint8Array.from([0x00, 0x7f, 1, 2, 3, 4, 5, 6, 7, 8]));
+      expect(() => assertSerialEncoding(nonMinimal)).toThrow(DenyError);
+      const negative = await withSerial(Uint8Array.from([0x80, 1, 2, 3, 4, 5, 6, 7, 8]));
+      expect(() => assertSerialEncoding(negative)).toThrow(DenyError);
+      const tooLong = await withSerial(Uint8Array.from({ length: 21 }, (_, i) => 0x10 + i));
+      expect(() => assertSerialEncoding(tooLong)).toThrow(DenyError);
+      const fine = await withSerial(Uint8Array.from([0x00, 0x80, 1, 2, 3, 4, 5, 6, 7, 8]));
+      expect(() => assertSerialEncoding(fine)).not.toThrow();
     });
   });
 

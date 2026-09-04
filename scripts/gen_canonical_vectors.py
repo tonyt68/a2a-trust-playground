@@ -108,16 +108,23 @@ DIFFERENTIAL = [
         "permitted_operations": ["spawn", "read"],
         "allowed_scopes": ["read:events", "write:events"],
         "can_spawn": ["c669186f-a84b-4d7a-81f3-05880df87114"],
-        "max_children": 2,
+        "max_children": 1,
         "policy_ref": "policy-store/8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa/current",
         "ttl_seconds": 86400,
     }),
-    ("an Agent Spawn extension body (§10.5 Table 6)", {
+    ("an Agent Spawn extension body (§10.5 Table 7)", {
         "parent_agent_id": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
         "spawned_at": "2026-09-03T00:00:00Z",
         "spawn_nonce": "AAAAAAAAAAAAAAAAAAAAAA==",
     }),
-    ("a cross-organizational grant body (§13.2 Table 10)", {
+    ("an Agent Spawn extension body of a cross-organizational spawn (§10.5, grant_id)", {
+        "parent_agent_id": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
+        "spawned_at": "2026-09-03T00:00:00Z",
+        "spawn_nonce": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "grant_id": "019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d",
+    }),
+    ("a cross-organizational grant body (§13.2 Table 11)", {
+        "grant_id": "019b3c8e-2f10-7a4b-9c6d-3e5f7a9b1c2d",
         "grantor": "partner-org",
         "grantee": "playground-org",
         "template": "c669186f-a84b-4d7a-81f3-05880df87114",
@@ -126,11 +133,16 @@ DIFFERENTIAL = [
         "ttl_seconds": 3600,
         "max_spawns": 3,
     }),
-    ("an audit chain entry", {
-        "index": 0,
+    # §19.7: the preimage is every member but entry_hash — previous_hash included.
+    ("an audit log entry for a spawn, as hashed (§10.4 Table 6, §19.7)", {
+        "spawning_agent_id": "8f14e45f-ceea-467a-9c0f-7ad0f1b0d5aa",
+        "child_template_id": "c669186f-a84b-4d7a-81f3-05880df87114",
+        "requested_scopes": ["read:events"],
+        "granted_scopes": ["read:events"],
+        "spawn_nonce": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "timestamp": "2026-09-04T00:00:00.000Z",
+        "outcome": "ALLOWED",
         "previous_hash": "0" * 64,
-        "decision": "ALLOWED",
-        "timestamp": "2026-09-03T00:00:00.000Z",
     }),
     ("unicode in ordinary values", {"owner": "José", "note": "naïve café"}),
     ("keys needing escapes", {'a"b': 1, "c\\d": 2, "e\tf": 3}),

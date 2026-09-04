@@ -33,7 +33,7 @@ let minted, parentId, childId, parentT, childT, now;
 beforeAll(async () => {
   now = new Date();
   parentId = newAgentId(); childId = newAgentId();
-  parentT = templateFor({ subject: parentId, scopes: ['read:events', 'write:events'], canSpawn: [childId], maxChildren: 2,
+  parentT = templateFor({ subject: parentId, scopes: ['read:events', 'write:events'], canSpawn: [childId], maxChildren: 1,
     ttlSeconds: 86400, permittedOperations: ['spawn', 'read'] });
   childT = templateFor({ subject: childId, scopes: ['read:events'], ttlSeconds: 43200 });
   minted = await mintChain({ parent: parentT, child: childT, now });
@@ -175,70 +175,169 @@ describe('§9.1 / §9.2 / §9.3 — the Registry gates', () => {
 });
 
 describe('§10.2 / §19.2 — the spawn request at the Registry', () => {
-  let registry, attested;
-  beforeAll(async () => { registry = await Registry.create({ now }); attested = await registry.attest(childT); });
+  /**
+   * A Registry holds state now — the policy in force, the children it has
+   * spawned, the live certificates — so each test that spawns gets its own,
+   * with the parent's policy naming the child (§10.2 step 3).
+   */
+  const fresh = async ({ targets = [childId] } = {}) => {
+    const registry = await Registry.create({ now });
+    await registry.adoptPolicyFor(parentT, { spawnTargets: targets, now });
+    return { registry, attested: await registry.attest(childT) };
+  };
   const at = (offsetSeconds) => new Date(now.getTime() + offsetSeconds * 1000).toISOString();
 
-  it('accepts a fresh request and records parent, time and nonce in the child (§10.5)', async () => {
+  it('accepts a fresh request and records parent, time and nonce in the child (§10.5), and the event in the audit log (§10.4)', async () => {
+    const { registry, attested } = await fresh();
     const r = await registry.spawn({ attested, parent: parentT, now });
     expect(r.spawn.parent_agent_id).toBe(parentId);
     expect(r.spawn.spawned_at).toBe(now.toISOString());
+    expect('grant_id' in r.spawn).toBe(false);
+    const entry = registry.audit.chain.at(-1);
+    expect(entry).toMatchObject({ spawning_agent_id: parentId, child_template_id: childId, outcome: 'ALLOWED',
+      spawn_nonce: r.spawn.spawn_nonce, requested_scopes: ['read:events'], granted_scopes: ['read:events'] });
+    expect('reason' in entry).toBe(false);
+    expect(() => registry.audit.assertEntries()).not.toThrow();
   });
   it('accepts 59 s either side and exactly 60 s', async () => {
     for (const s of [-59, 59, -60, 60]) {
+      const { registry, attested } = await fresh();
       await registry.spawn({ attested, parent: parentT, now, requestedAt: at(s) });
     }
   });
-  it('refuses 61 s in the past and 61 s in the future, naming the measured offset', async () => {
+  it('refuses 61 s in the past and 61 s in the future, naming the measured offset — and records each refusal (§10.4)', async () => {
+    const { registry, attested } = await fresh();
     const past = await refuses('ERR_SPAWN_STALE', registry.spawn({ attested, parent: parentT, now, requestedAt: at(-61) }));
     expect(past.detail).toMatch(/61\.0 s in the past/);
     const future = await refuses('ERR_SPAWN_STALE', registry.spawn({ attested, parent: parentT, now, requestedAt: at(61) }));
     expect(future.detail).toMatch(/61\.0 s in the future/);
+    const denied = registry.audit.chain.filter((e) => e.outcome === 'DENIED');
+    expect(denied).toHaveLength(2);
+    expect(denied[0]).toMatchObject({ child_template_id: childId, granted_scopes: [] });
+    expect(denied[0].reason).toMatch(/^ERR_SPAWN_STALE/);
+    expect(() => registry.audit.assertEntries()).not.toThrow();
   });
-  it('the window is 60, not "roughly a minute": 60.5 s is refused', () =>
-    refuses('ERR_SPAWN_STALE', registry.spawn({ attested, parent: parentT, now, requestedAt: at(60.5) })));
-  it('refuses a nonce it has already accepted (§19.2)', async () => {
+  it('the window is 60, not "roughly a minute": 60.5 s is refused', async () => {
+    const { registry, attested } = await fresh();
+    await refuses('ERR_SPAWN_STALE', registry.spawn({ attested, parent: parentT, now, requestedAt: at(60.5) }));
+  });
+  it('refuses a nonce it has already seen (§19.2)', async () => {
+    const { registry, attested } = await fresh();
     const nonce = newNonce();
     await registry.spawn({ attested, parent: parentT, now, nonce });
     await refuses('ERR_NONCE_REUSED', registry.spawn({ attested, parent: parentT, now, nonce }));
   });
-  it('a refused request does not spend its nonce', async () => {
+  it('a nonce is spent by being PRESENTED: a refused request consumes it (§19.2)', async () => {
+    const { registry, attested } = await fresh();
     const nonce = newNonce();
     await refuses('ERR_SPAWN_STALE', registry.spawn({ attested, parent: parentT, now, nonce, requestedAt: at(-61) }));
-    await registry.spawn({ attested, parent: parentT, now, nonce });   // still fresh
+    await refuses('ERR_NONCE_REUSED', registry.spawn({ attested, parent: parentT, now, nonce }));
+    await registry.spawn({ attested, parent: parentT, now });   // a fresh nonce is all a retry needs
   });
-  it('a request refused by ISSUE\'s re-gate (not spawn\'s own checks) does not spend its nonce either', async () => {
-    // spawn() itself has nothing to object to here — the tampered signature is
-    // only caught by issue()'s re-verification, which runs AFTER spawn()'s
-    // checks. The nonce must still be free for a corrected retry.
+  it('a request refused by ISSUE\'s re-gate has spent its nonce too — the nonce names the request, not the outcome', async () => {
+    const { registry, attested } = await fresh();
     const nonce = newNonce();
     const tampered = { ...attested, pa_sig: attested.owner_sig };
     await refuses('ERR_TEMPLATE_SIGNATURE', registry.spawn({ attested: tampered, parent: parentT, now, nonce }));
-    await registry.spawn({ attested, parent: parentT, now, nonce });   // still fresh
+    await refuses('ERR_NONCE_REUSED', registry.spawn({ attested, parent: parentT, now, nonce }));
   });
   it('refuses a nonce under 128 bits and a timestamp with an offset', async () => {
+    const { registry, attested } = await fresh();
     await refuses('ERR_SCHEMA_VIOLATION', registry.spawn({ attested, parent: parentT, now, nonce: Buffer.alloc(8).toString('base64') }));
     await refuses('ERR_TIMESTAMP_FORMAT', registry.spawn({ attested, parent: parentT, now, requestedAt: now.toISOString().replace('Z', '+00:00') }));
   });
-  it('Check 1 — refuses a parent without spawn in PermittedOperations (§10.1)', () =>
-    refuses('ERR_SPAWN_NOT_PERMITTED', registry.spawn({ attested, parent: { ...parentT, permitted_operations: ['read'] }, now })));
-  it('Check 1 — refuses a child not in CanSpawn (§10.1)', () =>
-    refuses('ERR_CHILD_NOT_WHITELISTED', registry.spawn({ attested, parent: { ...parentT, can_spawn: [] }, now })));
+  it('Check 1 — refuses a parent without spawn in PermittedOperations (§10.1)', async () => {
+    const { registry, attested } = await fresh();
+    await refuses('ERR_SPAWN_NOT_PERMITTED', registry.spawn({ attested, parent: { ...parentT, permitted_operations: ['read'] }, now }));
+  });
+  it('Check 1 — refuses a child not in CanSpawn (§10.1)', async () => {
+    const { registry, attested } = await fresh();
+    await refuses('ERR_CHILD_NOT_WHITELISTED', registry.spawn({ attested, parent: { ...parentT, can_spawn: [], max_children: 0 }, now }));
+  });
+  it('step 3 — refuses a child the policy in force does not name, and one with no policy in force (§10.2)', async () => {
+    let { registry, attested } = await fresh({ targets: [] });
+    let e = await refuses('ERR_SPAWN_NOT_IN_POLICY', registry.spawn({ attested, parent: parentT, now }));
+    expect(e.detail).toMatch(/not among them/);
+    registry = await Registry.create({ now }); attested = await registry.attest(childT);
+    e = await refuses('ERR_SPAWN_NOT_IN_POLICY', registry.spawn({ attested, parent: parentT, now }));
+    expect(e.detail).toMatch(/no policy is in force/);
+  });
+  it('step 3 — a policy that withdraws the target is refused without re-certification: CanSpawn still names the child', async () => {
+    const { registry, attested } = await fresh();
+    await registry.adoptPolicyFor(parentT, { spawnTargets: [], version: 2, now });
+    await refuses('ERR_SPAWN_NOT_IN_POLICY', registry.spawn({ attested, parent: parentT, now }));
+  });
+  it('the policy store refuses a version that does not supersede the one in force, and a policy beyond the template (§11.4, §8.3)', async () => {
+    const { registry } = await fresh();
+    await refuses('ERR_POLICY_VERSION', registry.adoptPolicyFor(parentT, { version: 1, now }));
+    await refuses('ERR_SPAWN_EXCEEDS_TEMPLATE', registry.adoptPolicyFor(parentT, { spawnTargets: [newAgentId()], version: 2, now }));
+  });
   it('refuses a child template holding scopes the parent does not (§10.3)', async () => {
+    const { registry } = await fresh();
     const wide = await registry.attest({ ...childT, allowed_scopes: ['read:events', 'admin:all'] });
     await refuses('ERR_SCOPE_ESCALATION', registry.spawn({ attested: wide, parent: parentT, now }));
   });
   it('refuses to issue a child template holding no scopes at all — not only at the pipeline\'s stage 8', async () => {
+    const { registry } = await fresh();
     const empty = await registry.attest({ ...childT, allowed_scopes: [] });
     await refuses('ERR_EMPTY_SCOPES', registry.spawn({ attested: empty, parent: parentT, now }));
   });
-  it('a Registry rebuilt from a document has forgotten its nonces — which is what §19.2’s retention rule is about', async () => {
+  it('step 5 — enforces MaxChildren from the count it holds (§10.2)', async () => {
+    const other = newAgentId();
+    const parent2 = { ...parentT, can_spawn: [childId, other], max_children: 1 };
+    const registry = await Registry.create({ now });
+    await registry.adoptPolicyFor(parent2, { now });
+    await registry.spawn({ attested: await registry.attest(childT), parent: parent2, now });
+    const e = await refuses('ERR_MAX_CHILDREN', registry.spawn({ attested: await registry.attest({ ...childT, subject: other }), parent: parent2, now }));
+    expect(e.detail).toMatch(/enforced here/);
+  });
+  it('step 5 — refuses a second live certificate for one child template (§10.2, §12.1)', async () => {
+    const parent2 = { ...parentT, max_children: 1 };
+    const registry = await Registry.create({ now });
+    await registry.adoptPolicyFor(parent2, { now });
+    const attested = await registry.attest(childT);
+    await registry.spawn({ attested, parent: parent2, now });
+    // The count is at the cap, so raise it out of the way: the LIVE check is the one under test.
+    registry.children.clear();
+    await refuses('ERR_DUPLICATE_SUBJECT', registry.spawn({ attested, parent: parent2, now }));
+  });
+  it('a cross-organizational spawn requires a grant, and records its grant_id in the certificate (§10.5, §13)', async () => {
+    const { signEnvelope } = await import('../src/crypto-sign.js');
+    const registry = await Registry.create({ now });
+    await registry.adoptPolicyFor(parentT, { now });
+    const foreign = { ...childT, org_id: 'partner-org' };
+    const attested = await registry.attest(foreign);
+    await refuses('ERR_GRANT_MISSING', registry.spawn({ attested, parent: parentT, now }));
+    const grantBody = { grant_id: newAgentId(), grantor: 'partner-org', grantee: parentT.org_id, template: childId,
+      allowed_scopes: ['read:events'], issued_at: now.toISOString(), ttl_seconds: 3600, max_spawns: 1 };
+    const grant = await signEnvelope(grantBody, registry.authorities.owner.privateKey, registry.authorities.pa.privateKey);
+    const issued = await registry.spawn({ attested: await registry.attest(foreign), parent: parentT, now, grant });
+    expect(issued.spawn.grant_id).toBe(grantBody.grant_id);
+    expect(parseSpawnExtension(parseCertificate(issued.cert_pem)).grant_id).toBe(grantBody.grant_id);
+    expect(registry.audit.chain.at(-1)).toMatchObject({ outcome: 'ALLOWED', grant_id: grantBody.grant_id });
+    // MaxSpawns is the Grantor's Registry's count (§13.2): the second spawn under a max_spawns of 1 is refused.
+    registry.children.clear(); registry.live.clear();
+    await refuses('ERR_MAX_SPAWNS', registry.spawn({ attested: await registry.attest(foreign), parent: parentT, now, grant }));
+  });
+  it('refuses to issue a template envelope carrying a content_hash (§11.6)', async () => {
+    const { registry, attested } = await fresh();
+    await refuses('ERR_ENVELOPE_MEMBER', registry.issue({ ...attested, content_hash: '0'.repeat(64) }));
+  });
+  it('a Registry rebuilt from a document has forgotten its nonces — which is what §19.2’s retention rule is about — and re-reads its policy store', async () => {
     const doc = { chain: [{ role: 'ca', cert_pem: minted.ca.cert_pem, key_pem: minted.ca.key_pem }],
-      authorities: { owner: minted.authorities.owner, pa: minted.authorities.pa } };
+      authorities: { owner: minted.authorities.owner, pa: minted.authorities.pa }, policies: minted.policies };
     const rebuilt = await Registry.fromDocument(doc, { now });
     expect(rebuilt.seenNonces.size).toBe(0);
+    expect(rebuilt.policies.get(parentId).spawn_targets).toEqual([childId]);
     const issued = await rebuilt.spawn({ attested: await rebuilt.attest(childT), parent: parentT, now });
     await validateCertificate({ certPem: issued.cert_pem, caPem: minted.ca.cert_pem, agentId: childId, now });
+  });
+  it('a Registry rebuilt from a document refuses a policy in force whose signature does not verify', async () => {
+    const tampered = JSON.parse(JSON.stringify(minted.policies[0]));
+    tampered.body.spawn_targets = [];
+    const doc = { chain: [{ role: 'ca', cert_pem: minted.ca.cert_pem, key_pem: minted.ca.key_pem }],
+      authorities: { owner: minted.authorities.owner, pa: minted.authorities.pa }, policies: [tampered] };
+    await refuses('ERR_OWNER_SIG_INVALID', Registry.fromDocument(doc, { now }));
   });
   it('a Registry cannot be rebuilt from a document missing the anchor key or an authority key', async () => {
     let e = await refuses('ERR_SCHEMA_VIOLATION', Registry.fromDocument({ chain: [{ role: 'ca', cert_pem: minted.ca.cert_pem }] }));
@@ -284,5 +383,19 @@ describe('identifiers and nonces', () => {
     const s = (pem) => Buffer.from(parseCertificate(pem).serialNumber.valueBlock.valueHexView).toString('hex');
     expect(s(minted.agents[0].cert_pem)).not.toBe(s(minted.agents[1].cert_pem));
     expect(publicKeyInfo(parseCertificate(minted.agents[0].cert_pem)).curve).toBe('P-256');
+  });
+  it('serials are positive, minimal DER of at most twenty octets (§7.1)', () => {
+    for (const pem of [minted.ca.cert_pem, ...minted.agents.map((a) => a.cert_pem)]) {
+      const bytes = new Uint8Array(parseCertificate(pem).serialNumber.valueBlock.valueHexView);
+      expect(bytes.length).toBeLessThanOrEqual(20);
+      expect(bytes[0] & 0x80).toBe(0);
+      if (bytes[0] === 0x00) expect(bytes[1] & 0x80).toBe(0x80);
+    }
+  });
+  it('mintChain returns the policies it put in force: the parent names the child, the child names nothing', () => {
+    expect(minted.policies.map((p) => p.body.subject)).toEqual([parentId, childId]);
+    expect(minted.policies[0].body.spawn_targets).toEqual([childId]);
+    expect(minted.policies[1].body.spawn_targets).toEqual([]);
+    expect(minted.registry.audit.chain.map((e) => e.action ?? 'spawn')).toEqual(['issue_template', 'policy_update', 'spawn', 'policy_update']);
   });
 });
